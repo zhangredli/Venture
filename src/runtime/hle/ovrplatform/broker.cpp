@@ -1,5 +1,6 @@
 #include "hle/ovrplatform/broker.h"
 #include "hle/ovrplatform/identity_iap.h"
+#include "hle/ovrplatform/local_user.h"
 #include "common/log.h"
 #include "common/meta/accounts.h"
 #include "hle/ovrplatform/diagnostics.h"
@@ -20,6 +21,7 @@ class Brokered final : public Provider {
   std::string key_, token_;
   User user_;
   Error identity_;
+  std::shared_ptr<Provider> local_;
   bool ready_ = false;
   std::shared_ptr<PipeChannel> channel_;
   std::shared_ptr<HttpTransport> http_;
@@ -39,6 +41,7 @@ class Brokered final : public Provider {
     return *cache_;
   }
   Error reject(ErrorCode error) {
+    local_.reset();
     ready_ = false;
     token_.clear();
     user_ = {};
@@ -60,13 +63,23 @@ class Brokered final : public Provider {
       return reject(ErrorCode::identity_mismatch);
     identity_ = failure(code(packet, "identityError"));
     token_ = venture::str(packet, "appToken");
-    user_ = {venture::number(packet, "appUserId"), venture::str(packet, "alias"), {}};
+    user_ = {venture::number(packet, "appUserId"), venture::str(packet, "alias"),
+             venture::str(packet, "displayName")};
+    local_.reset();
+    if (venture::field(packet, "localIdentity") == true) {
+      if (key_ != "local" || identity_.code != ErrorCode::unauthenticated || !token_.empty())
+        return reject(ErrorCode::identity_mismatch);
+      local_ = local_user_provider(user_);
+      if (auto error = local_->prepare()) return reject(error.code);
+    }
     if (!identity_ &&
         (token_.empty() || !user_.id || token_.size() > 128 * 1024 ||
          token_.find('\0') != token_.npos))
       return reject(ErrorCode::invalid_response);
     ready_ = true;
-    if (identity_)
+    if (local_)
+      log::info("accounts", "Using persistent local user identity");
+    else if (identity_)
       log::warn("accounts",
                 "Application credentials received without a user: error {} "
                 "(-20001 means no Meta account is signed in for this game)",
@@ -81,17 +94,10 @@ class Brokered final : public Provider {
     try {
       auto reply = channel_->call(venture::Json{{"op", "validate"}});
       auto error = failure(code(reply, "error"));
-      if (error) {
-        token_.clear();
-        user_ = {};
-        ready_ = false;
-      }
+      if (error) return reject(error.code);
       return error;
     } catch (...) {
-      token_.clear();
-      user_ = {};
-      ready_ = false;
-      return failure(ErrorCode::unavailable);
+      return reject(ErrorCode::unavailable);
     }
   }
 
@@ -113,7 +119,7 @@ public:
       return failure(ErrorCode::unavailable);
     }
   }
-  // Asked of Meta only now, when the game calls for it.
+  // Entitlement is resolved by the launcher when the game calls for it.
   Result entitlement(std::stop_token stop) override {
     {
       std::lock_guard lock(mutex_);
@@ -136,7 +142,7 @@ public:
       return {failure(ErrorCode::cancelled)};
     if (auto error = validate())
       return {error};
-    return {identity_, user_};
+    return local_ ? local_->logged_in_user(stop) : Result{identity_, user_};
   }
   Result access_token(std::stop_token stop) override {
     std::lock_guard lock(mutex_);
@@ -194,6 +200,13 @@ public:
   }
   Result service(std::string_view name, const RequestArgs& args,
                  std::stop_token stop) override {
+    {
+      std::lock_guard lock(mutex_);
+      if (local_) {
+        if (auto error = validate()) return {error};
+        return local_->service(name, args, stop);
+      }
+    }
     if (name == "ovr_IAP_LaunchCheckoutFlow") return {unsupported_operation(name)};
     if (args.error) return {args.error};
     try {
@@ -248,6 +261,7 @@ public:
       return {failure(ErrorCode::cancelled)};
     if (auto error = validate())
       return {error};
+    if (local_) return local_->user_proof(stop);
     if (identity_)
       return {identity_};
     try {
@@ -310,9 +324,23 @@ Error CredentialBroker::prepare_locked(std::stop_token stop) {
   // platform calls get that answer. Entitlement is never asked here, only when
   // the game itself calls ovr_Entitlement_GetIsViewerEntitled ("entitlement").
   try {
-    profile_ = store_->load();
+    identity_ = {failure(ErrorCode::uninitialized)};
     provider_.reset();
+    profile_ = store_->load();
     if (profile_.access_token.empty()) {
+      if (key_ == "local") {
+        provider_ = local_user_provider(venture::paths::data_dir());
+        if (auto error = provider_->prepare()) {
+          provider_.reset();
+          identity_ = {error};
+          return error;
+        }
+        identity_ = provider_->access_token(stop);
+        const auto local = provider_->logged_in_user(stop);
+        if (local.error) return local.error;
+        identity_.user = local.user;
+        return {};
+      }
       identity_ = {failure(ErrorCode::unauthenticated)};
       return {};
     }
@@ -350,7 +378,9 @@ venture::Json CredentialBroker::packet() const {
       {"identityError", static_cast<int>(identity_.error.code)},
       {"appToken", identity_.error ? "" : identity_.text},
       {"appUserId", identity_.user.id},
-      {"alias", identity_.user.alias}};
+      {"alias", identity_.user.alias},
+      {"displayName", identity_.user.display_name},
+      {"localIdentity", key_ == "local" && profile_.access_token.empty() && identity_.user.id != 0}};
 }
 venture::Json CredentialBroker::handle(const venture::Json &request) {
   std::lock_guard lock(mutex_);
@@ -388,6 +418,7 @@ venture::Json CredentialBroker::handle(const venture::Json &request) {
                     {"interval", result.error ? 0 : std::stoi(result.text)}};
   }
   if (op == "refresh") {
+    if (key_ == "local" && profile_.access_token.empty()) return packet();
     // No retry storms even if a guest writes directly to its inherited pipe.
     auto now = std::chrono::steady_clock::now();
     if (now - last_refresh_ < std::chrono::seconds(5))

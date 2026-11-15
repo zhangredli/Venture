@@ -532,10 +532,6 @@ Plan parse_plan(const Json &j) {
       throw std::runtime_error("Invalid installation asset metadata.");
     file.required = field(f, "required") != false;
     file.sha256 = str(f, "sha256");
-    if (!file.sha256.empty() &&
-        (file.sha256.size() != 64 ||
-         file.sha256.find_first_not_of("0123456789abcdef") != std::string::npos))
-      throw std::runtime_error("Invalid installation file hash.");
     auto &iap = field(f, "iap_item");
     file.sku = str(iap, "sku");
     file.iap_id = str(iap, "id");

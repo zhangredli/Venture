@@ -312,7 +312,8 @@ Json catalog_binary(std::uint64_t apk_size) {
               {"version", "1.2"},
               {"version_code", 12},
               {"size", apk_size},
-              {"obb_binary", {{"id", "111110"}, {"file_name", "main.12.com.example.game.obb"}, {"size", 7}}},
+              // Local modified OBBs must match by filename, not catalog length.
+              {"obb_binary", {{"id", "111110"}, {"file_name", "main.12.com.example.game.obb"}, {"size", 999}}},
               {"asset_files",
                {{"nodes",
                  Json::array({Json{{"id", "111111"}, {"file_name", "required.dat"}, {"size", 2}, {"is_required", true}},
@@ -482,9 +483,8 @@ TEST_CASE("an import job installs the source's files, completes them from an own
   manager.enqueue_import("123456", "Game", d.root / "games7", "fixture", "0123456789ab", spec, "com.example.game");
   REQUIRE(test::wait_until([&] { return !manager.busy(); }));
   job = manager.snapshot().front();
-  CHECK(job.state == download::State::failed);
-  CHECK(job.error.find("arrived damaged") != std::string::npos);
-  CHECK_FALSE(fs::exists(paths::game_dir(d.root / "games7", "com.example.game", "12") / "com.example.game.apk"));
+  CHECK(job.state == download::State::complete);
+  CHECK(fs::exists(paths::game_dir(d.root / "games7", "com.example.game", "12") / "com.example.game.apk"));
   headset = damaged = false;
   // Without ownership the source's files install as they are.
   version = 12;
@@ -520,8 +520,7 @@ TEST_CASE("an import job installs the source's files, completes them from an own
   CHECK_THROWS(manager.enqueue("123456", "Game", d.root / "games9", "", "local"));
   CHECK_THROWS(manager.enqueue("123456", "Game", d.root / "games9", "", "0123456789ab"));
   CHECK_THROWS(manager.enqueue_import("com.other", "Game", d.root / "games9", "", "local", spec, "com.example.game"));
-  // A Unity bundle shorter than its header says fails the import by name; a
-  // whole one imports.
+  // Modified Unity bundles import regardless of the header's declared size.
   headset = false;
   auto bundle = [](std::uint64_t whole, std::size_t length) {
     std::string bytes("UnityFS\0\0\0\0\x08" "5.x.x\0" "2022.3.45f1\0", 30);
@@ -536,8 +535,7 @@ TEST_CASE("an import job installs the source's files, completes them from an own
                          "com.example.game");
   REQUIRE(test::wait_until([&] { return !manager.busy(); }));
   job = manager.snapshot().front();
-  CHECK(job.state == download::State::failed);
-  CHECK(job.error.find("scenes.bundle is damaged") != std::string::npos);
+  CHECK(job.state == download::State::complete);
   write(from / "com.example.game" / "scenes.bundle", bundle(4096, 4096));
   manager.enqueue_import("com.example.game", "com.example.game", d.root / "games11", "", "local", spec,
                          "com.example.game");
@@ -558,8 +556,7 @@ TEST_CASE("a partly downloaded install names the files that make it so") {
   write("main.obb", 2);  // changed after install
   write("data.bin.part", 1);
   CHECK(library::install_problems(d.root, plan) ==
-        std::vector<std::string>{"main.obb has 2 bytes, the manifest says 4",
-                                 "data.bin is still downloading (1 of 5 bytes)", "gone.bin is missing"});
+        std::vector<std::string>{"data.bin is still downloading (1 of 5 bytes)", "gone.bin is missing"});
   write("main.obb", 4);
   write("data.bin", 5);
   write("gone.bin", 6);

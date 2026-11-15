@@ -8,6 +8,7 @@ add_library(venture_ovrplatform STATIC
   library.cpp
   diagnostics.cpp
   account_store.cpp
+  local_user.cpp
   request_args.cpp
   model.cpp
   identity_iap.cpp

@@ -1,4 +1,5 @@
 #include "launcher/core.h"
+#include "launcher/control_install.h"
 #include "launcher/debug_report.h"
 #include "launcher/i18n/i18n.h"
 #include "launcher/sign_in_link.h"
@@ -39,6 +40,27 @@ std::string exception_text() {
 Core::Core(Options options)
     : options_(std::move(options)), data_(paths::data_dir()), secrets_(data_),
       vault_(data_), settings_(library::Settings::defaults(data_)) {
+  // Acquire ownership before migration or settings/library writes. A second
+  // graphical/control instance must not mutate the profile during startup.
+  if (!options_.launch_requested) {
+    try {
+      queue_lock_ = std::make_unique<FileLock>(data_ / "locks/download-queue.lock", false);
+    } catch (...) {
+      if (options_.control || !options_.cli)
+        throw std::runtime_error("Another Venture instance is using this library. Close it before reconnecting.");
+    }
+  }
+  // Recover before migration/scanning, including when the native GUI is used
+  // after a control-host crash. Never recover while another profile writer owns it.
+  const auto transactions = data_ / "control-transactions";
+  if (fs::exists(transactions)) for (const auto &entry : fs::directory_iterator(transactions)) {
+    if (entry.path().extension() != ".json") continue;
+    if (!queue_lock_) throw std::runtime_error("Open the assistant to recover an interrupted installation before launching.");
+    const auto package = paths::utf8(entry.path().stem());
+    if (!paths::safe_package(package) || is_link(entry.path())) throw std::runtime_error("Invalid installation recovery journal.");
+    FileLock lock(data_ / "locks" / ("game-" + package + ".lock"), false);
+    control::Transaction::recover(entry.path());
+  }
   fs::create_directories(data_ / "logs");
   log::set_file(paths::utf8(data_ / "logs" / (options_.launch_requested ?
       "launcher-direct-" + std::to_string(current_process_id()) + ".log" :
@@ -47,8 +69,8 @@ Core::Core(Options options)
     log::info("launcher", "Venture command line starting.");
   else
     log::info("launcher", "Venture native launcher starting.");
-  steam_sync_allowed_ = options_.interactive() && steam_library::profile_sync_allowed();
-  if (!options_.interactive())
+  steam_sync_allowed_ = (options_.interactive() || options_.control) && steam_library::profile_sync_allowed();
+  if (!options_.interactive() && !options_.control)
     log::info("steam", "Steam sync disabled for non-interactive launcher mode.");
   else if (!steam_sync_allowed_)
     log::info("steam", "Steam sync disabled: redirected data profile has no Steam root override.");
@@ -125,7 +147,7 @@ void Core::start(bool refresh_library) {
   // launcher or the command line beside an open launcher would download the
   // same jobs twice. A direct launch never keeps it.
   bool persistent = !options_.launch_requested;
-  if (persistent)
+  if (persistent && !queue_lock_)
     try {
       queue_lock_ = std::make_unique<FileLock>(data_ / "locks" / "download-queue.lock", false);
     } catch (...) {
@@ -204,7 +226,7 @@ void Core::uninstall(const library::Install &install) {
   if (!failure.empty()) throw std::runtime_error(failure);
 }
 void Core::remove_superseded(const std::vector<library::Install> &installs) {
-  if (options_.launch_requested) return;
+  if (options_.launch_requested || options_.control || !owns_download_queue()) return;
   const auto jobs = downloads_ ? downloads_->snapshot() : std::vector<download::Job>{};
   std::vector<library::Install> old;
   for (auto &version : library::superseded(installs)) {
@@ -849,6 +871,11 @@ Json Core::save_migration_status() const {
 }
 const library::Install *Core::installed(std::string_view id,
                                        bool complete) const {
+  if (auto selected = preferred_installs_.find(std::string(id)); selected != preferred_installs_.end()) {
+    for (const auto &i : installs_)
+      if (i.id() == id && i.directory == selected->second && (!complete || i.complete)) return &i;
+    return nullptr;
+  }
   for (auto &i : installs_)
     if (i.id() == id && (!complete || i.complete))
       return &i;
@@ -1507,7 +1534,8 @@ void Core::uninstall_addon(std::string_view app, std::string_view sku) {
 Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &folder, std::string serial) {
   auto current = installed(app_id, false);
   if (!current) throw std::runtime_error("Install this game before importing its save data.");
-  if (current->plan.pinned) throw std::runtime_error("Save data imports go to the game's own install.");
+  if (current->plan.pinned && !options_.control) throw std::runtime_error("Save data imports go to the game's own install.");
+  const auto pin = current->plan.pinned ? current->plan.folder() : std::string();
   const auto package = current->plan.package;
   auto running = running_.find(std::string(app_id));
   if (running != running_.end() && !running->second.exit)
@@ -1517,16 +1545,16 @@ Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &fol
   auto key = launch_choice(app_id, play_key(app_id)).account_key;
   if (key.empty()) key = "local";
   if (!folder.empty())
-    return [data = data_, key, package, folder, lock](std::stop_token stop) {
+    return [data = data_, key, package, folder, lock, pin](std::stop_token stop) {
       auto found = saves::find_local(folder, package);
       if (!found)
         throw std::runtime_error("No save data for " + package + " was found there. Pick a copy of the game's "
                                  "Android/data/" + package + " folder, or of its files folder.");
-      return saves::import_local(data, key, package, *found, stop);
+      return saves::import_local(data, key, package, *found, stop, pin);
     };
   const auto adb = adb_path();
   if (adb.empty()) throw std::runtime_error("adb was not found. Install Android platform-tools, or set adb's location in Settings.");
-  return [data = data_, key, package, adb, serial, lock](std::stop_token stop) {
+  return [data = data_, key, package, adb, serial, lock, pin](std::stop_token stop) {
     auto chosen = serial;
     if (chosen.empty()) {
       auto devices = android::adb::Client(adb).devices(stop);
@@ -1537,7 +1565,7 @@ Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &fol
                                                  : android::adb::state_message(devices.front()));
       chosen = ready->serial;
     }
-    return saves::import_headset(data, key, package, android::adb::Client(adb, chosen), stop);
+    return saves::import_headset(data, key, package, android::adb::Client(adb, chosen), stop, pin);
   };
 }
 void Core::import_saves_later(std::string_view app_id, const fs::path &folder) {
@@ -1690,6 +1718,7 @@ void Core::launch_game(std::string_view id, std::string_view requested,
     if (auto o = installed(other, false); o && other != game_id && r.process.active() && o->plan.package == i->plan.package)
       throw std::runtime_error("Another version of this game is running. Quit it first.");
   launch_pending_.insert(game_id);
+  launch_cancelled_.erase(game_id);
   const auto install = *i;
   try {
     game_locks_[game_id] = std::make_unique<FileLock>(
@@ -1760,6 +1789,11 @@ void Core::launch_game(std::string_view id, std::string_view requested,
       return [this, install, app_id, key, runtime, root, console, broker,
               details, reply, catalog = std::move(catalog)] {
         launch_pending_.erase(app_id);
+        if (launch_cancelled_.erase(app_id)) {
+          game_locks_.erase(app_id);
+          if (reply) reply->finish(false);
+          return;
+        }
         if (reply && !reply->begin()) {
           game_locks_.erase(app_id);
           return;
@@ -1787,6 +1821,7 @@ void Core::launch_game(std::string_view id, std::string_view requested,
             rescan();
           }
           auto &r = running_[app_id];
+          r.rendered = std::make_shared<std::atomic<bool>>(false);
           r.quitting = false;
           r.started = std::chrono::steady_clock::now();
           r.log = data_ / "logs" / ("runtime-" + install.plan.package + ".log");
@@ -1820,8 +1855,14 @@ void Core::launch_game(std::string_view id, std::string_view requested,
           Environment environment = library::launch_environment(settings_, app_id, options_.automation);
           environment.push_back({"VENTURE_CONTROLLER_REPORT", paths::utf8(data_ / "controllers.json")});
           r.process.spawn(runtime, args, r.console, console,
-                          [broker, routes = std::move(routes), details, key, queue = launch_queue_](const Json &request) {
+                          [broker, rendered = r.rendered, routes = std::move(routes), details, key, queue = launch_queue_](const Json &request) {
                             const auto op = str(request, "op");
+                            if (op == "runtime.ready") {
+                              const auto &ready = field(request, "ready");
+                              if (!ready.is_boolean()) return Json{{"success", false}};
+                              rendered->store(ready.get<bool>(), std::memory_order_relaxed);
+                              return Json{{"success", true}};
+                            }
                             if (op == "launch_details" || op == "launch_other_app") {
                               if (number(broker->handle(Json{{"op", "validate"}}), "error") != 0)
                                 return Json{{"success", false}};

@@ -942,6 +942,11 @@ XrResult Session::end(const XrFrameEndInfo *info, std::shared_ptr<const void> ow
     vulkan::timing_end_frame(info->displayTime, guest_swap_interval, display_timing.rate());
     if (frame_index == 1) { profile::mark("first_frame_submission"); startup_diagnostics::arm(); }
     startup_diagnostics::note_frame_submitted();
+    for (std::uint32_t i = 0; i < info->layerCount; ++i)
+      if (info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {
+        startup_diagnostics::note_rendered_frame();
+        break;
+      }
     if (profile::enabled) {
       for (std::uint32_t i = 0; i < info->layerCount; ++i)
         if (info->layers[i]->type == XR_TYPE_COMPOSITION_LAYER_PROJECTION) {

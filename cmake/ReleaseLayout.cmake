@@ -1,3 +1,4 @@
+set(VENTURE_ANGLE_ROOT "${PROJECT_SOURCE_DIR}/.deps/angle/d2e5e488da0c6215f8276e5b8d992a4a6ec20c32" CACHE PATH "Installed Venture ANGLE dependency")
 if(TARGET venture AND TARGET venture-runtime)
   if(NOT TARGET Python3::Interpreter)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -30,4 +31,14 @@ if(TARGET venture AND TARGET venture-runtime)
       --strip "${CMAKE_STRIP}" ${venture_import_tools})
     set_tests_properties(release_layout PROPERTIES TIMEOUT 600)
   endif()
+endif()
+
+if(TARGET venture-control AND TARGET venture-runtime AND WIN32)
+  get_filename_component(venture_control_compiler_bin "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  add_custom_target(package-control
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/package_release.py"
+      --build "${CMAKE_BINARY_DIR}" --output "${PROJECT_SOURCE_DIR}/dist/Venture-control-win64"
+      --angle "${VENTURE_ANGLE_ROOT}" --strip "${CMAKE_STRIP}"
+      --readobj "${venture_control_compiler_bin}/llvm-readobj.exe" --core-only
+    DEPENDS venture-control venture-runtime VERBATIM)
 endif()

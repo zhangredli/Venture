@@ -31,11 +31,11 @@ struct Imported {
 };
 // `data` is the launcher's data folder, `key` the account ("local" for none).
 Imported import_local(const fs::path &data, std::string_view key, std::string_view package, const Found &found,
-                      std::stop_token stop = {});
+                      std::stop_token stop = {}, std::string_view pin = {});
 // The app's shared storage on the headset (its private storage cannot be read
 // over adb); throws when the game is not on it or has nothing there.
 Imported import_headset(const fs::path &data, std::string_view key, std::string_view package,
-                        const android::adb::Client &client, std::stop_token stop = {});
+                        const android::adb::Client &client, std::stop_token stop = {}, std::string_view pin = {});
 // Backups of `package` for `key`, newest last.
 fs::path backups_dir(const fs::path &data, std::string_view key, std::string_view package);
 }  // namespace venture::saves

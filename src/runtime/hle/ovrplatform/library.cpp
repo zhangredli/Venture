@@ -6,6 +6,7 @@
 #include "hle/ovrplatform/asset_service.h"
 #include "hle/ovrplatform/broker.h"
 #include "hle/ovrplatform/hle.h"
+#include "hle/ovrplatform/local_user.h"
 #include "hle/ovrplatform/progression.h"
 
 namespace venture::ovrplatform {
@@ -19,9 +20,11 @@ std::unique_ptr<Session> make_runtime_session(
   auto http = meta_http_transport();
   auto provider = channel
       ? brokered_provider(app, process_config().account_key, channel, http)
-      : owned_library_provider(
+      : process_config().account_key == "local"
+          ? local_user_provider(paths::data_dir())
+          : owned_library_provider(
             app, runtime_secret_store(process_config().account_key), http);
-  if (!channel)
+  if (!channel && process_config().account_key != "local")
     log::warn("accounts",
               "CLI credential fallback: the launching account's profile token is "
               "readable by game code. Use the launcher for credential isolation.");

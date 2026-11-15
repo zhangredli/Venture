@@ -47,7 +47,7 @@ std::vector<Install> scan(const fs::path& games) {
         Install install{std::move(plan), manifest.path(), true};
         for (const auto& f : install.plan.files) {
           const auto path = install.directory / paths::from_utf8(f.name);
-          if (!paths::within(install.directory, path) || !fs::is_regular_file(path) || fs::file_size(path) != f.size) install.complete = false;
+          if (!paths::within(install.directory, path) || !fs::is_regular_file(path) || fs::file_size(path) == 0) install.complete = false;
         }
         result.push_back(std::move(install));
       } catch (const std::exception&) { log::warn("steam", "Skipped an unreadable Steam installation plan"); }

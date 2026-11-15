@@ -15,6 +15,7 @@ struct Options {
   bool launch_requested = false, invalid_launch = false;
   bool automation = false;
   bool cli = false; // venture-cli: no window, its own log
+  bool control = false; // Flutter stdio owner; preserve explicitly selected versions.
   std::string smoke_view,
       smoke_select,                  // smoke_select: app id whose page to open
       smoke_install;                 // app id to install through the Install action

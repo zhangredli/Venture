@@ -37,9 +37,10 @@ std::optional<Found> found_in(const fs::path &folder) {
 struct Target {
   fs::path root, staging, backup;
 };
-Target target(const fs::path &data, std::string_view key, std::string_view package, Area area) {
-  const auto game = account_data_dir(data, key, package);
-  const auto backups = backups_dir(data, key, package);
+Target target(const fs::path &data, std::string_view key, std::string_view package, Area area, std::string_view pin) {
+  const auto game = account_data_dir(data, key, package, pin);
+  auto backups = backups_dir(data, key, package);
+  if (!pin.empty()) backups = backups.parent_path() / paths::from_utf8(std::string(package) + "@" + std::string(pin));
   auto stamp =
       std::format("{:%Y-%m-%d %H-%M-%S}", std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()));
   std::error_code ec;
@@ -117,8 +118,8 @@ std::optional<Found> find_local(const fs::path &picked, std::string_view package
 }
 
 Imported import_local(const fs::path &data, std::string_view key, std::string_view package, const Found &found,
-                      std::stop_token stop) {
-  const auto t = target(data, key, package, found.area);
+                      std::stop_token stop, std::string_view pin) {
+  const auto t = target(data, key, package, found.area, pin);
   return staged(t, package, [&](Imported &n) {
     if (!found.entry.empty()) return copy_tree(found.folder, t.staging / paths::from_utf8(found.entry), n, stop);
     for (const auto &entry : fs::directory_iterator(found.folder)) {
@@ -135,14 +136,14 @@ Imported import_local(const fs::path &data, std::string_view key, std::string_vi
 }
 
 Imported import_headset(const fs::path &data, std::string_view key, std::string_view package,
-                        const android::adb::Client &client, std::stop_token stop) {
+                        const android::adb::Client &client, std::stop_token stop, std::string_view pin) {
   const auto app = client.app(package, stop);
   if (!app) throw std::runtime_error("This game is not installed on the headset.");
   const auto source = import::open_device(client, *app);
   if (source->saves.empty())
     throw std::runtime_error("The headset has no save data for this game in Android/data/" + std::string(package) +
                              ". Saves a game keeps in its private storage cannot be read over USB.");
-  const auto t = target(data, key, package, Area::external);
+  const auto t = target(data, key, package, Area::external, pin);
   return staged(t, package, [&](Imported &n) {
     for (const auto &file : source->saves) {
       const auto path = t.staging / paths::from_utf8(file.name);

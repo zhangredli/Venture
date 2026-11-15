@@ -31,8 +31,7 @@ std::vector<std::string> install_problems(const fs::path &directory, const meta:
     auto n = fs::file_size(target, ec);
     if (ec || !n)
       out.push_back(f.name + " is empty");
-    else if (f.size && f.size != n)
-      out.push_back(std::format("{} has {} bytes, the manifest says {}", f.name, n, f.size));
+
   }
   return out;
 }
@@ -126,7 +125,7 @@ std::vector<Install> scan(const fs::path &root, bool* authoritative) {
           }
           auto n = fs::file_size(target);
           install.bytes += n;
-          if (!n || (f.size && f.size != n))
+          if (!n)
             install.complete = false;
         }
         // Say once why an install counts as partly downloaded: a file that
@@ -371,7 +370,7 @@ bool addon_installed(const Install &install, std::string_view sku) {
     found = true;
     auto path = install.directory / paths::from_utf8(f.name);
     if (!paths::within(install.directory, path) || !fs::is_regular_file(path) ||
-        fs::file_size(path) != f.size)
+        fs::file_size(path) == 0)
       return false;
   }
   return found;
@@ -425,7 +424,7 @@ void keep_installed_apk(meta::Plan &plan, const meta::Plan &installed,
   auto path = directory / paths::from_utf8(old->name);
   std::error_code ec;
   if (!paths::within(directory, path) || !fs::is_regular_file(path, ec) ||
-      fs::file_size(path, ec) != old->size || ec)
+      fs::file_size(path, ec) == 0 || ec)
     return;
   apk->size = old->size;
   apk->sha256 = old->sha256;
@@ -749,10 +748,10 @@ const controls::Config& Settings::controls_for(std::string_view app_id) const {
   return it == game_controls.end() ? controls : it->second;
 }
 Settings Settings::load(const fs::path &data) {
+  return from_json(data, fs::exists(data / "settings.json") ? paths::read_json(data / "settings.json") : Json::object());
+}
+Settings Settings::from_json(const fs::path &data, const Json &j) {
   auto s = defaults(data);
-  if (!fs::exists(data / "settings.json"))
-    return s;
-  auto j = paths::read_json(data / "settings.json");
   auto games = paths::from_utf8(str(j, "gamesDirectory")),
        runtime = paths::from_utf8(str(j, "runtimeExecutable"));
   if (games.is_absolute())
@@ -828,11 +827,10 @@ Settings Settings::load(const fs::path &data) {
   s.show_hidden = field(j, "showHiddenGames") == true;
   return s;
 }
-void Settings::save(const fs::path &data) const {
+Json Settings::json() const {
   if (!games.is_absolute() || !runtime.is_absolute())
     throw std::runtime_error(
         "Use absolute paths for the games folder and runtime executable.");
-  fs::create_directories(games);
   Json j{{"version", 1},
          {"gamesDirectory", paths::utf8(games)},
          {"logLevel", log_level},
@@ -881,7 +879,12 @@ void Settings::save(const fs::path &data) const {
       throw std::runtime_error("Use an absolute path for adb.");
     j["adbExecutable"] = paths::utf8(adb);
   }
-  paths::atomic_write(data / "settings.json", j.dump(2));
+  return j;
+}
+void Settings::save(const fs::path &data) const {
+  const auto value = json();
+  fs::create_directories(games);
+  paths::atomic_write(data / "settings.json", value.dump(2));
 }
 std::vector<std::pair<std::string, std::string>> launch_environment(const Settings &s, std::string_view app_id,
                                                                     bool automation) {

@@ -13,6 +13,7 @@ if(TARGET venture-framework)
       "${CMAKE_CURRENT_SOURCE_DIR}/ColdRestartTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/LifecycleTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/LocalServicesTest.java"
+      "${CMAKE_CURRENT_SOURCE_DIR}/NsdTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/PreferencesTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/AssetReadTraceTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/RecordingHost.java"
@@ -25,7 +26,7 @@ if(TARGET venture-framework)
       "${CMAKE_CURRENT_SOURCE_DIR}/DownloadManagerTest.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/InstrumentationProbe.java"
     DEPENDS "${VENTURE_FRAMEWORK_JAR}" FrameworkTest.java AbiProfileTest.java VMStackTest.java ProcessExitTest.java ProcessCommandsTest.java
-      ColdRestartTest.java LifecycleTest.java LocalServicesTest.java PreferencesTest.java AssetReadTraceTest.java RecordingHost.java TestNatives.java GraphicsTest.java ThermalTest.java MenuQuitTest.java SQLiteTest.java WebkitTest.java DownloadManagerTest.java InstrumentationProbe.java VERBATIM)
+      ColdRestartTest.java LifecycleTest.java LocalServicesTest.java NsdTest.java PreferencesTest.java AssetReadTraceTest.java RecordingHost.java TestNatives.java GraphicsTest.java ThermalTest.java MenuQuitTest.java SQLiteTest.java WebkitTest.java DownloadManagerTest.java InstrumentationProbe.java VERBATIM)
   add_custom_target(venture_framework_tests ALL DEPENDS "${framework_test_classes}/FrameworkTest.class")
   if(WIN32)
     set(framework_classpath "${VENTURE_FRAMEWORK_JAR}\;${framework_test_classes}")
@@ -34,6 +35,8 @@ if(TARGET venture-framework)
   endif()
 
   add_test(NAME framework_java COMMAND "${VENTURE_JAVA}" -Xverify:all -cp "${framework_classpath}" FrameworkTest)
+  add_test(NAME framework_nsd COMMAND "${VENTURE_JAVA}" -Xverify:all -cp "${framework_classpath}" NsdTest)
+  set_tests_properties(framework_nsd PROPERTIES TIMEOUT 30)
 
   add_test(NAME framework_preferences COMMAND "${VENTURE_JAVA}" -Xverify:all -cp "${framework_classpath}" PreferencesTest)
   set_tests_properties(framework_preferences PROPERTIES TIMEOUT 30)

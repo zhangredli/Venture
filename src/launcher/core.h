@@ -170,12 +170,14 @@ protected:
     std::optional<int> exit;
     std::string failure; // shown for a non-zero exit, or why a game closed itself
     bool quitting = false; // Quit game was pressed; the game is saving and closing
+    std::shared_ptr<std::atomic<bool>> rendered;
     // Quit game takes the Play button's place; it ignores clicks for a moment
     // after the start so a double click on Play does not quit the game.
     std::chrono::steady_clock::time_point started{};
   };
   std::map<std::string, Running> running_;
   std::set<std::string> launch_pending_;
+  std::set<std::string> launch_cancelled_;
   // Cross-process game lock also covers a Steam launch beside an open UI.
   std::map<std::string, std::unique_ptr<FileLock>> game_locks_;
   bool steam_pending_ = false, steam_busy_ = false, steam_restart_ = false;
@@ -334,6 +336,7 @@ protected:
   void error(std::string message);
   const library::Install *installed(std::string_view id,
                                     bool complete = true) const;
+  std::map<std::string, fs::path> preferred_installs_; // explicit control-protocol selection
   // An installation of an Android package, whatever app id it has.
   const library::Install *installed_package(std::string_view package) const {
     for (const auto &i : installs_)

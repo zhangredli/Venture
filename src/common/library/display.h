@@ -89,8 +89,8 @@ struct DisplaySettings {
   // For a game's "auto": the percent of GPU memory in use past which new
   // textures are compressed; 0 follows the global threshold.
   int texture_compression_threshold = 0;
-  // A game's advanced switches it turned on or off: advanced_switches id ->
-  // "on" or "off". An absent id keeps the runtime's default.
+  // Compatibility defaults or a game's overrides: advanced_switches id ->
+  // "on" or "off". An absent game id inherits the global/runtime default.
   std::map<std::string, std::string> advanced;
   bool operator==(const DisplaySettings &) const = default;
 };

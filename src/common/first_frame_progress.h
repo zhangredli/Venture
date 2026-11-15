@@ -3,6 +3,9 @@
 
 namespace venture::startup_diagnostics {
 bool first_frame_submitted();
+// A successfully submitted projection layer, rather than an empty XR frame.
+void note_rendered_frame();
+bool rendered_frame_submitted();
 // Frames submitted to the host this process, across sessions.
 void note_frame_submitted();
 std::uint64_t frames_submitted();

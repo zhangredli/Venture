@@ -306,7 +306,7 @@ def static_runtime_notices(build, output):
         copy(llvm[-1], output / "licenses/llvm-runtime/copyright")
 
 
-def package(build, output, angle, strip, readobj):
+def package(build, output, angle, strip, readobj, core_only=False):
     if output.exists():
         for current, dirs, files in os.walk(output, followlinks=False):
             for name in dirs + files:
@@ -334,7 +334,7 @@ def package(build, output, angle, strip, readobj):
     bin_dir = build / "bin"
     windows = os.name == "nt"
     suffix = ".exe" if windows else ""
-    names = ["venture" + suffix, "venture-runtime" + suffix, "venture-framework.jar",
+    names = [("venture-control" if core_only else "venture") + suffix, "venture-runtime" + suffix, "venture-framework.jar",
              "venture-java-bridge.jar"]
     names += ["WebView2Loader.dll", "libEGL.dll", "libGLESv2.dll"] if windows else ["libEGL.so", "libGLESv2.so"]
     names += ["avutil-60.dll", "avcodec-62.dll", "avformat-62.dll", "swscale-9.dll"] if windows else [
@@ -343,7 +343,7 @@ def package(build, output, angle, strip, readobj):
         names.append("libsqlite3.so.0")
     for name in names:
         source = bin_dir / name
-        if not windows and name in ("libEGL.so", "libGLESv2.so") and not source.is_file():
+        if name in ("libEGL.dll", "libGLESv2.dll", "libEGL.so", "libGLESv2.so") and not source.is_file():
             source = angle / "bin" / name
         copy(source, output / name)
     for name in ("LGPL-2.1.txt", "ffmpeg-8.1.3.tar.xz", "ffmpeg-8.1.3.tar.xz.asc"):
@@ -449,9 +449,10 @@ def main():
     parser.add_argument("--angle", type=Path, required=True)
     parser.add_argument("--strip", type=Path, required=True)
     parser.add_argument("--readobj", type=Path)
+    parser.add_argument("--core-only", action="store_true", help="Package the Flutter control process instead of the GUI")
     args = parser.parse_args()
     output = args.output or ROOT / "dist" / ("Venture-win64" if os.name == "nt" else "Venture-linux64")
-    package(args.build.resolve(), output.resolve(), args.angle.resolve(), args.strip, args.readobj)
+    package(args.build.resolve(), output.resolve(), args.angle.resolve(), args.strip, args.readobj, args.core_only)
 
 
 if __name__ == "__main__":

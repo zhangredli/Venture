@@ -16,7 +16,7 @@ public class Context {
   public static final String ACTIVITY_SERVICE = "activity", WINDOW_SERVICE = "window", AUDIO_SERVICE = "audio",
                              POWER_SERVICE = "power", INPUT_METHOD_SERVICE = "input_method",
                              VIBRATOR_SERVICE = "vibrator", VIBRATOR_MANAGER_SERVICE = "vibrator_manager",
-                             CONNECTIVITY_SERVICE = "connectivity",
+                             CONNECTIVITY_SERVICE = "connectivity", NSD_SERVICE = "servicediscovery",
                              TELEPHONY_SERVICE = "phone", CLIPBOARD_SERVICE = "clipboard",
                              BATTERY_SERVICE = "batterymanager", DISPLAY_SERVICE = "display";
   public static final String LOCATION_SERVICE = "location", BLUETOOTH_SERVICE = "bluetooth";
@@ -274,6 +274,7 @@ public class Context {
       case VIBRATOR_MANAGER_SERVICE -> new VibratorManager(this);
       case TELEPHONY_SERVICE -> new android.telephony.TelephonyManager();
       case CONNECTIVITY_SERVICE -> new android.net.ConnectivityManager();
+      case NSD_SERVICE -> new android.net.nsd.NsdManager();
       case CLIPBOARD_SERVICE -> new ClipboardManager();
       case BATTERY_SERVICE -> new BatteryManager();
       case DISPLAY_SERVICE -> new android.hardware.display.DisplayManager();
@@ -310,6 +311,7 @@ public class Context {
       java.util.Map.entry(VibratorManager.class, VIBRATOR_MANAGER_SERVICE),
       java.util.Map.entry(android.telephony.TelephonyManager.class, TELEPHONY_SERVICE),
       java.util.Map.entry(android.net.ConnectivityManager.class, CONNECTIVITY_SERVICE),
+      java.util.Map.entry(android.net.nsd.NsdManager.class, NSD_SERVICE),
       java.util.Map.entry(ClipboardManager.class, CLIPBOARD_SERVICE),
       java.util.Map.entry(BatteryManager.class, BATTERY_SERVICE),
       java.util.Map.entry(android.hardware.display.DisplayManager.class, DISPLAY_SERVICE),

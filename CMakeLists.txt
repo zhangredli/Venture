@@ -11,6 +11,8 @@ project(Venture VERSION 0.2.3.6 LANGUAGES C CXX)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 option(VENTURE_BUILD_LAUNCHER "Build the native launcher" ON)
+option(VENTURE_BUILD_GUI "Build the native launcher window" ON)
+option(VENTURE_BUILD_CONTROL "Build the Flutter control process" ON)
 option(VENTURE_BUILD_RUNTIME "Build the game runtime" ON)
 option(VENTURE_BUILD_TESTS "Build tests" ON)
 option(VENTURE_INSTALLED_GAME_TESTS "Register optional tests that scan installed games" OFF)

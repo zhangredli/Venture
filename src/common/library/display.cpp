@@ -57,8 +57,8 @@ DisplaySettings display_from_json(const Json &j, bool per_game) {
     d.custom_rate = int(hz);
   // A custom size needs one; without, it is the runtime's.
   if (d.resolution == "custom" && !d.width) d.resolution = per_game ? "" : "runtime";
-  // A game's advanced switches; unknown ids and values (other versions) are dropped.
-  if (const auto it = j.find("advanced"); per_game && it != j.end() && it->is_object())
+  // Global defaults and per-game overrides share the same compatibility switches.
+  if (const auto it = j.find("advanced"); it != j.end() && it->is_object())
     for (const auto &[id, value] : it->items())
       if (value.is_string() && (value == "on" || value == "off") &&
           std::ranges::any_of(advanced_switches, [&](const auto &a) { return id == a.id; }))
@@ -88,7 +88,7 @@ Json display_to_json(const DisplaySettings &d) {
 DisplaySettings effective_display(const DisplaySettings &global, const DisplaySettings *game) {
   auto d = global;
   if (!game) return d;
-  d.advanced = game->advanced;  // per game only
+  for (const auto &[id, value] : game->advanced) d.advanced[id] = value;
   if (!game->resolution.empty()) {
     d.resolution = game->resolution;
     d.percent = game->percent;

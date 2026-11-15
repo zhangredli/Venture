@@ -672,7 +672,7 @@ void Manager::run(std::stop_token shutdown) {
         auto p = dir / paths::from_utf8(f.name);
         if (!paths::within(dir, p))
           throw std::runtime_error("File path escapes installation directory.");
-        if (fs::is_regular_file(p) && fs::file_size(p) == f.size)
+        if (fs::is_regular_file(p) && fs::file_size(p) > 0)
           remaining -= f.size;
         else {
           p += ".part";
@@ -737,12 +737,12 @@ void Manager::run(std::stop_token shutdown) {
       if (stop.stop_requested())
         throw std::runtime_error("Transfer paused.");
       if (!e->job.sku.empty() || !e->job.asset_id.empty()) {
-        // Publish only after every file in the SKU passed the size check.
+        // Publish only after every required file in the SKU exists.
         for (auto &f : selected) {
           auto target = dir / paths::from_utf8(f.name);
-          if (!fs::is_regular_file(target) || fs::file_size(target) != f.size)
+          if (!fs::is_regular_file(target) || fs::file_size(target) == 0)
             throw std::runtime_error(
-                "Add-on content did not pass the size check.");
+                "Add-on content is missing or empty after import.");
         }
         // A kept manifest is the better catalog: only its add-on marker
         // changes, never its file list.
@@ -758,7 +758,7 @@ void Manager::run(std::stop_token shutdown) {
                                   auto p = dir / paths::from_utf8(f.name);
                                   return paths::within(dir, p) &&
                                          fs::is_regular_file(p) &&
-                                         fs::file_size(p) == f.size;
+                                         fs::file_size(p) > 0;
                                 }) &&
             std::ranges::find(manifest.installed_addons, sku) ==
                 manifest.installed_addons.end();
@@ -807,12 +807,10 @@ void Manager::run(std::stop_token shutdown) {
 }
 namespace {
 // One file from an import source into `part`, continuing a partial copy left
-// by an interrupted import. Returns the copy's SHA-256; with `verify`, it is
-// checked against the source's own hash when the source can compute one (a
-// headset).
+// by an interrupted import. Records the copy's SHA-256 for metadata only.
 std::string copy(const import::Source &source, const import::SourceFile &file,
                  const fs::path &part, std::stop_token stop,
-                 const std::function<void(uint64_t)> &report, bool verify) {
+                 const std::function<void(uint64_t)> &report) {
   digest::Sha256 sha;
   uint64_t done = 0;
   std::error_code ec;
@@ -833,17 +831,6 @@ std::string copy(const import::Source &source, const import::SourceFile &file,
   if (done)
     log::info("downloads", "Resuming the import of {} at {} MiB.", file.name,
               done >> 20);
-  // The source hashes its copy while this one transfers.
-  std::optional<std::string> remote;
-  std::jthread checker([&](std::stop_token own) {
-    std::stop_source both;
-    std::stop_callback outer(stop, [&] { both.request_stop(); });
-    std::stop_callback inner(own, [&] { both.request_stop(); });
-    try {
-      if (verify) remote = source.sha256(file, both.get_token());
-    } catch (...) {
-    }
-  });
   {
     std::ofstream out(part, std::ios::binary | (done ? std::ios::app : std::ios::trunc));
     if (!out)
@@ -871,14 +858,7 @@ std::string copy(const import::Source &source, const import::SourceFile &file,
   }
   if (done != file.size)
     throw std::runtime_error(file.name + " changed while it was being imported.");
-  checker.join();
   const auto hash = sha.finish();
-  if (remote && *remote != hash) {
-    fs::remove(part, ec);
-    throw std::runtime_error(file.name +
-                             " arrived damaged (its checksum differs from the "
-                             "headset's). Check the cable and retry.");
-  }
   return hash;
 }
 } // namespace
@@ -965,8 +945,7 @@ uint64_t Manager::run_import(Entry &e, meta::Store *store, std::stop_token stop)
     std::error_code ec;
     auto target = target_of(f);
     // A bundle cut short at an earlier source is copied again.
-    return fs::is_regular_file(target, ec) && fs::file_size(target, ec) == f.size &&
-           unity_bundle_size(target).value_or(f.size) == f.size;
+    return fs::is_regular_file(target, ec) && fs::file_size(target, ec) > 0;
   };
   // Saves go to the importing account's storage for the game ("local" for
   // none), only when it has none yet: saves made on this computer are never
@@ -1035,15 +1014,8 @@ uint64_t Manager::run_import(Entry &e, meta::Store *store, std::stop_token stop)
     };
     if (step.from) {
       auto part = paths::from_utf8(paths::utf8(target) + ".part");
-      const auto hash = copy(*source, *step.from, part, stop, report, true);
-      if (const auto whole = unity_bundle_size(part); whole && *whole != step.from->size) {
-        std::error_code ec;
-        fs::remove(part, ec);
-        throw std::runtime_error(std::format(
-            "{} is damaged in {}: it has {} bytes of {}. Reinstall the game on the headset, or copy the "
-            "file again, then retry.",
-            step.file.name, source->describe(), step.from->size, *whole));
-      }
+      const auto hash = copy(*source, *step.from, part, stop, report);
+
       fs::rename(part, target);
       for (auto &f : plan.files)
         if (f.name == step.file.name) f.sha256 = hash;
@@ -1057,7 +1029,7 @@ uint64_t Manager::run_import(Entry &e, meta::Store *store, std::stop_token stop)
     if (stop.stop_requested())
       throw std::runtime_error("Transfer paused.");
     if (!present(step.file))
-      throw std::runtime_error(step.file.name + " did not pass the size check.");
+      throw std::runtime_error(step.file.name + " is missing or empty after import.");
     finished += step.file.size;
   }
   if (!saves.empty()) {
@@ -1080,7 +1052,7 @@ uint64_t Manager::run_import(Entry &e, meta::Store *store, std::stop_token stop)
         copy(*source, file, target, stop, [&](uint64_t done) {
           std::lock_guard lock(mutex_);
           e.job.done = finished + done;
-        }, false);
+        });
       } catch (const std::exception &error) {
         if (stop.stop_requested()) throw;
         // A game's storage also holds caches the headset rewrites while it

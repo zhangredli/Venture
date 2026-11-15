@@ -1,5 +1,6 @@
 #include "xr/eye_scale.h"
 #include "common/environment.h"
+#include "common/first_frame_progress.h"
 #include "common/log.h"
 #include "common/paths.h"
 #include "common/launch_details.h"
@@ -390,6 +391,28 @@ int main(int argc, char** argv) {
     auto broker = credential_read ? venture::PipeChannel::inherited(credential_read,
                                                                credential_write)
                                   : nullptr;
+    // Report from a monitor, so pipe IO never blocks the render thread. Each
+    // replacement worker resets readiness before loading its fresh game state.
+    std::jthread ready_reporter;
+    if (broker) {
+      broker->call(venture::Json{{"op", "runtime.ready"}, {"ready", false}});
+      ready_reporter = std::jthread([broker](std::stop_token stop) {
+        std::mutex mutex;
+        std::condition_variable_any changed;
+        std::unique_lock lock(mutex);
+        while (!stop.stop_requested()) {
+          if (venture::startup_diagnostics::rendered_frame_submitted()) {
+            try {
+              broker->call(venture::Json{{"op", "runtime.ready"}, {"ready", true}});
+            } catch (...) {
+              venture::log::warn("launch", "Launcher readiness channel closed");
+            }
+            return;
+          }
+          changed.wait_for(lock, stop, std::chrono::milliseconds(50), [] { return false; });
+        }
+      });
+    }
     // Temporary memory-packet diagnostic until the ELF/APK ISA selector lands.
     // Reserves at startup, before any HLE registration or dynamic host library.
     if (test_a32_memory) {

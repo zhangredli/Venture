@@ -111,6 +111,7 @@ void add_data(Source &source, const Listing &listing, std::string_view apk_locat
   std::set<std::string> names;
   for (auto &[location, size] : listing) {
     const auto slash = "/" + location;
+    if (slash.find("/Android/data/") != std::string::npos) continue;
     auto at = slash.rfind(folder);
     // Reopening an APK inside its package-named directory makes that
     // directory the scan root. Keep its loose data, just as a parent pick does.
@@ -289,14 +290,14 @@ Plan plan(const meta::Plan &catalog, const Source &source) {
   auto local = [&](const meta::File &f) -> const SourceFile * {
     if (f.kind == "apk") return &source.apk;
     for (auto &d : source.data)
-      if (lower(d.name) == lower(f.name) && d.size == f.size) return &d;
+      if (lower(d.name) == lower(f.name)) return &d;
     return nullptr;
   };
   for (auto &f : out.plan.files) {
     const auto *from = local(f);
     if (from) used.insert(lower(from->name));
-    // The source's APK, possibly a modified build, is the one installed.
-    if (f.kind == "apk" && f.size != from->size) {
+    // Use the actual local file's size for progress, including modified OBBs.
+    if (from && f.size != from->size) {
       f.size = from->size;
       f.sha256.clear();
     }

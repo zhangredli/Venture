@@ -41,12 +41,12 @@ std::vector<Install> uninstall_set(const std::vector<Install> &installs, const I
 std::vector<Install> superseded(const std::vector<Install> &installs);
 bool addon_installed(const Install &install, std::string_view sku);
 // Upgrade old manifests from a fresh, same-build Meta catalog. Presence comes
-// from size-checked files on disk; this never asserts account ownership.
+// from files present on disk; this never asserts account ownership.
 void refresh_catalog(const fs::path &root, const meta::Plan &catalog);
 // A same-build Meta plan names the store's APK, but an import may have
 // installed another APK of that build (a modified one). While the APK in
-// `directory` still has the size the installed manifest records, `plan` keeps
-// that size and hash, so a catalog refresh or a resumed download neither marks
+// `directory` is still present, `plan` keeps
+// its recorded size and hash, so a catalog refresh or a resumed download neither marks
 // the install incomplete nor replaces the APK.
 void keep_installed_apk(meta::Plan &plan, const meta::Plan &installed,
                         const fs::path &directory);
@@ -181,6 +181,8 @@ struct Settings {
   std::vector<fs::path> roots() const;
   static Settings defaults(const fs::path &data);
   static Settings load(const fs::path &data);
+  static Settings from_json(const fs::path &data, const Json &value);
+  Json json() const;
   void save(const fs::path &data) const;
 };
 // The environment a launch of `app_id` takes from the settings, the game's own

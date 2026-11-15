@@ -1,3 +1,4 @@
+if(VENTURE_BUILD_GUI)
 add_library(venture_imgui STATIC
   ${imgui_SOURCE_DIR}/imgui.cpp
   ${imgui_SOURCE_DIR}/imgui_draw.cpp
@@ -10,6 +11,7 @@ add_library(venture_imgui STATIC
 target_include_directories(venture_imgui SYSTEM PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${imgui_SOURCE_DIR}/misc/cpp ${imgui_SOURCE_DIR}/misc/freetype)
 target_link_libraries(venture_imgui PUBLIC SDL3::SDL3-static freetype)
 target_compile_definitions(venture_imgui PUBLIC IMGUI_ENABLE_FREETYPE IMGUI_USE_WCHAR32)
+endif()
 # Interface translations: i18n/*.po compiled in at build time (cmake/I18n.cmake).
 include(${PROJECT_SOURCE_DIR}/cmake/I18n.cmake)
 i18n_add_library(venture_i18n SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/i18n)
@@ -18,6 +20,7 @@ add_library(venture_launcher_core STATIC core.cpp debug_report.cpp diagnosis.cpp
 target_link_libraries(venture_launcher_core PUBLIC venture_common venture_ovrplatform venture_i18n)
 # Store links are looked up again once per version (core.cpp).
 target_compile_definitions(venture_launcher_core PRIVATE VENTURE_VERSION="${PROJECT_VERSION}")
+if(VENTURE_BUILD_GUI)
 add_executable(venture WIN32 main.cpp app.cpp ui/style.cpp ui/views.cpp ui/chrome.cpp ui/logo.cpp ui/rich_text.cpp assets/texture_cache.cpp
   assets/controller_art.cpp
   assets/render_model.cpp)
@@ -47,11 +50,6 @@ target_compile_definitions(venture PRIVATE VENTURE_VERSION="${PROJECT_VERSION}")
 target_link_libraries(venture PRIVATE venture_launcher_core venture_imgui webpdecoder)
 target_include_directories(venture SYSTEM PRIVATE ${stb_SOURCE_DIR} ${webp_SOURCE_DIR}/src ${nanosvg_SOURCE_DIR}/src)
 if(WIN32)
-  target_sources(venture_launcher_core PRIVATE platform/win32/auth_browser.cpp)
-  target_include_directories(venture_launcher_core PRIVATE platform/win32)
-  target_include_directories(venture_launcher_core SYSTEM PRIVATE ${webview2_SOURCE_DIR}/build/native/include)
-  target_compile_options(venture_launcher_core PRIVATE -fms-extensions)
-  target_link_libraries(venture_launcher_core PUBLIC ole32 user32 advapi32)
   target_sources(venture PRIVATE platform/win32/window_style.cpp)
   target_include_directories(venture PRIVATE platform/win32)
   target_compile_options(venture PRIVATE -fms-extensions)
@@ -71,11 +69,20 @@ if(WIN32)
   add_custom_command(TARGET venture POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
     ${webview2_SOURCE_DIR}/build/native/x64/WebView2Loader.dll $<TARGET_FILE_DIR:venture>/WebView2Loader.dll)
 else()
-  target_sources(venture_launcher_core PRIVATE platform/posix/auth_browser.cpp)
   target_sources(venture PRIVATE platform/posix/window_style.cpp platform/posix/system_fonts.cpp)
 endif()
 if(MINGW)
   target_link_options(venture PRIVATE -municode)
+endif()
+endif() # VENTURE_BUILD_GUI
+if(WIN32)
+  target_sources(venture_launcher_core PRIVATE platform/win32/auth_browser.cpp)
+  target_include_directories(venture_launcher_core PRIVATE platform/win32)
+  target_include_directories(venture_launcher_core SYSTEM PRIVATE ${webview2_SOURCE_DIR}/build/native/include)
+  target_compile_options(venture_launcher_core PRIVATE -fms-extensions)
+  target_link_libraries(venture_launcher_core PUBLIC ole32 user32 advapi32)
+else()
+  target_sources(venture_launcher_core PRIVATE platform/posix/auth_browser.cpp)
 endif()
 # venture-cli: the launcher's commands in a terminal, on the same core.
 add_executable(venture-cli cli.cpp)
@@ -87,4 +94,14 @@ if(WIN32)
 endif()
 if(MINGW)
   target_link_options(venture-cli PRIVATE -municode)
+endif()
+
+if(VENTURE_BUILD_CONTROL)
+  add_executable(venture-control control.cpp)
+  target_compile_definitions(venture-control PRIVATE VENTURE_VERSION="${PROJECT_VERSION}")
+  target_link_libraries(venture-control PRIVATE venture_launcher_core)
+  if(WIN32)
+    add_custom_command(TARGET venture-control POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      ${webview2_SOURCE_DIR}/build/native/x64/WebView2Loader.dll $<TARGET_FILE_DIR:venture-control>/WebView2Loader.dll)
+  endif()
 endif()

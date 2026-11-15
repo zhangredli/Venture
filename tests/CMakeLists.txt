@@ -48,6 +48,11 @@ if(TARGET venture_i18n)
   target_link_libraries(venture_tests PRIVATE venture_i18n)
 endif()
 if(VENTURE_BUILD_LAUNCHER)
+  if(VENTURE_BUILD_CONTROL)
+    add_executable(venture_control_tests test_main.cpp control_install_test.cpp import_test.cpp controls_test.cpp launcher_settings_test.cpp versions_test.cpp)
+    target_link_libraries(venture_control_tests PRIVATE venture_common doctest::doctest miniz)
+    add_test(NAME control_install COMMAND venture_control_tests)
+  endif()
   # Store links of imported APKs, with the shipped package -> app id pairs.
   target_sources(venture_tests PRIVATE store_link_test.cpp ${PROJECT_SOURCE_DIR}/src/launcher/store_link.cpp)
   target_include_directories(venture_tests PRIVATE ${PROJECT_BINARY_DIR}/src/launcher/generated)
@@ -76,6 +81,11 @@ if(VENTURE_BUILD_LAUNCHER)
   add_test(NAME launcher_settings_cli COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/launcher_settings_test.py"
     "$<TARGET_FILE:venture-cli>")
   add_dependencies(venture_passthrough_launch_probe venture-cli)
+  if(TARGET venture-control)
+    add_test(NAME control_rpc COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/control_rpc_test.py"
+      "$<TARGET_FILE:venture-control>" "$<TARGET_FILE:venture_passthrough_launch_probe>")
+    set_tests_properties(control_rpc PROPERTIES TIMEOUT 120)
+  endif()
 endif()
 if(VENTURE_BUILD_LAUNCHER AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(venture_launcher_video_tests launcher_video_test.cpp
@@ -657,6 +667,16 @@ endif()
 target_sources(venture_tests PRIVATE runtime/ovrplatform_test.cpp runtime/ovrplatform_http_test.cpp
   runtime/ovrplatform_presence_test.cpp runtime/assetfile_test.cpp runtime/horizon_test.cpp)
 target_link_libraries(venture_tests PRIVATE venture_ovrplatform)
+
+# Exercise persistent anonymous identity and both broker modes without the JIT.
+add_executable(venture_local_user_tests test_main.cpp local_user_test.cpp broker_http_test.cpp)
+target_include_directories(venture_local_user_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/runtime)
+target_link_libraries(venture_local_user_tests PRIVATE venture_ovrplatform doctest::doctest)
+if(WIN32)
+  target_link_libraries(venture_local_user_tests PRIVATE ws2_32)
+endif()
+add_test(NAME local_user_broker COMMAND venture_local_user_tests)
+set_tests_properties(local_user_broker PROPERTIES TIMEOUT 120)
 
 target_compile_definitions(venture_tests PRIVATE VENTURE_OVR_PLAN_FIXTURE="${CMAKE_CURRENT_BINARY_DIR}/ovrplatform-plan-test.json")
 if(WIN32)

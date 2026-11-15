@@ -17,6 +17,7 @@ const std::int64_t seconds = [] {
 }();
 Trigger trigger;
 std::atomic<bool> submitted{false};
+std::atomic<bool> rendered{false};
 std::atomic<std::uint64_t> frames{0};
 std::atomic<int> host_state{0};
 std::int64_t now() {
@@ -38,6 +39,8 @@ void arm() {
   if (enabled) trigger.arm(now());
 }
 bool first_frame_submitted() { return submitted.load(std::memory_order_relaxed); }
+void note_rendered_frame() { rendered.store(true, std::memory_order_relaxed); }
+bool rendered_frame_submitted() { return rendered.load(std::memory_order_relaxed); }
 void note_frame_submitted() { frames.fetch_add(1, std::memory_order_relaxed); }
 std::uint64_t frames_submitted() { return frames.load(std::memory_order_relaxed); }
 void note_host_session_state(int state) { host_state.store(state, std::memory_order_relaxed); }
