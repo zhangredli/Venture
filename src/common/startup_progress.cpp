@@ -20,6 +20,7 @@ std::atomic<bool> submitted{false};
 std::atomic<bool> rendered{false};
 std::atomic<std::uint64_t> frames{0};
 std::atomic<int> host_state{0};
+std::atomic<bool> host_focused_once{false};
 std::int64_t now() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -43,8 +44,12 @@ void note_rendered_frame() { rendered.store(true, std::memory_order_relaxed); }
 bool rendered_frame_submitted() { return rendered.load(std::memory_order_relaxed); }
 void note_frame_submitted() { frames.fetch_add(1, std::memory_order_relaxed); }
 std::uint64_t frames_submitted() { return frames.load(std::memory_order_relaxed); }
-void note_host_session_state(int state) { host_state.store(state, std::memory_order_relaxed); }
+void note_host_session_state(int state) {
+  host_state.store(state, std::memory_order_relaxed);
+  if (state == 5) host_focused_once.store(true, std::memory_order_relaxed);
+}
 bool host_session_focused() { return host_state.load(std::memory_order_relaxed) == 5; }  // XR_SESSION_STATE_FOCUSED
+bool host_session_ever_focused() { return host_focused_once.load(std::memory_order_relaxed); }
 bool first_frame_snapshot_configured() {
   return environment::getenv("VENTURE_FIRST_FRAME_SNAPSHOT_SECONDS") != nullptr;
 }

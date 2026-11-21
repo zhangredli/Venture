@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "launcher/diagnosis.h"
+#include <algorithm>
 #include <array>
 #include <cctype>
 
@@ -15,6 +16,9 @@ bool word_char(char c) { return std::isalnum(static_cast<unsigned char>(c)) || c
 struct Rule {
   std::array<std::string_view, 6> signatures;  // any one matches; lower case
   std::string_view cause, advice;
+  std::string_view also{};  // when set, must appear too; lower case
+  // When one appears, the rest of its line (as written) is added to the cause.
+  std::array<std::string_view, 2> detail{};
 };
 constexpr std::string_view kSendReport = "Send this report with an issue: the game needs a fix in Venture.";
 constexpr std::string_view kGpuAdvice =
@@ -41,10 +45,27 @@ constexpr Rule kRules[] = {
      "SteamVR was the OpenXR runtime, and the Venture Flatpak cannot reach SteamVR.",
      "Use the Venture AppImage, tarball or your distribution's package with SteamVR, or use WiVRn or Monado with "
      "the Flatpak."},
+    // xr/host_xr.cpp: an implicit OpenXR API layer the loader could not load
+    // failed the host instance (the loader's "Failed loading layer
+    // information"), named by the runtime's "OpenXR API layer broken:" warning
+    // or the report's own check of the registered layers (debug_report.cpp).
+    {{"repair or uninstall the program that installed it", "failed loading layer information"},
+     "An OpenXR API layer installed on this PC could not be loaded, and the VR runtime could not start with it.",
+     "Repair or reinstall the program that installed the layer, or uninstall it so its leftover registration goes, "
+     "update Venture, then press Play again.",
+     "could not create an instance",
+     {"openxr api layer broken: "}},
     {{"your configured openxr runtime is unavailable", "xr_error_runtime_unavailable"},
      "No OpenXR runtime was running, or none is set as the active one.",
      "Start your VR runtime (SteamVR, WiVRn or Monado), make it the active OpenXR runtime, connect the headset, "
      "then press Play again."},
+    // SteamVR's vrserver.txt when it saw no headset (a Quest over Link, Air Link or
+    // Virtual Desktop not connected yet); its xrCreateInstance then fails with -2.
+    {{"vriniterror_driver_wirelesshmdnotconnected", "vriniterror_init_hmdnotfound",
+      "vriniterror_driver_hmddisplaynotfound"},
+     "SteamVR found no headset: it was not connected yet when the game started.",
+     "Connect the headset to SteamVR first (Quest Link, Air Link, Virtual Desktop or Steam Link) and wait until "
+     "SteamVR shows it as connected, then press Play again."},
     {{"the openxr runtime failed to create an instance (xrresult -2)"},
      "The VR runtime could not start a session; it is often still shutting down from an earlier one.",
      "Close your VR runtime completely and start it again, then press Play again."},
@@ -59,6 +80,22 @@ constexpr Rule kRules[] = {
      "The VR runtime did not create the game's VR session.",
      "Update Venture and your graphics driver, close other VR tools and overlays (OpenXR Toolkit, other OpenXR "
      "layers), restart your VR runtime, then try again. If it keeps happening, send this report."},
+    // runtime/main.cpp report_foreign_worker_exit(): 0xFFFFFFFF from outside,
+    // with the run's host runtime from xr/host_xr.cpp's facts line. Virtual
+    // Desktop closes SteamVR when a game starts on its own runtime (VDXR), and
+    // closes that game when SteamVR starts again (H3VR2 with Index controllers).
+    {{"status 0xffffffff outside venture's exit paths"},
+     "Virtual Desktop's own OpenXR runtime (VDXR) ran the game, and the game was closed from outside. Virtual "
+     "Desktop closes SteamVR when a game starts on VDXR and closes that game when SteamVR starts again; controllers "
+     "and trackers that only SteamVR sees (Index controllers, Vive trackers) do not work on VDXR.",
+     "To use SteamVR controllers or trackers, set OpenXR Runtime to SteamVR in the Virtual Desktop Streamer app, "
+     "start SteamVR, then press Play. To stay on VDXR, leave SteamVR closed while the game runs.",
+     "host runtime: virtualdesktopxr"},
+    {{"status 0xffffffff outside venture's exit paths"},
+     "Another program closed the game (exit status 0xFFFFFFFF, a forced close from outside Venture). VR runtimes "
+     "do this to the games they run when they shut down or hand the headset to another runtime.",
+     "Keep your VR runtime running while the game plays, and do not start or close another VR runtime meanwhile. "
+     "If nothing like that happened, send this report with an issue."},
     // The kernel's own reports of a GPU reset (amdgpu, i915/xe, NVIDIA Xid).
     {{"gpu reset", "ring timeout", "nvrm: xid", "gpu hang",
       "stopped responding and has successfully recovered"},  // Windows: Display event 4101
@@ -143,8 +180,21 @@ std::optional<Diagnosis> diagnose(std::string_view evidence) {
   const std::string text = lower(evidence);
   for (const auto &rule : kRules)
     for (auto signature : rule.signatures)
-      if (!signature.empty() && text.find(signature) != std::string::npos)
-        return Diagnosis{std::string(rule.cause), std::string(rule.advice)};
+      if (!signature.empty() && text.find(signature) != std::string::npos &&
+          (rule.also.empty() || text.find(rule.also) != std::string::npos)) {
+        std::string cause(rule.cause);
+        for (auto prefix : rule.detail)
+          if (const auto at = prefix.empty() ? std::string::npos : text.find(prefix); at != std::string::npos) {
+            const auto from = at + prefix.size();
+            const auto end = std::min(evidence.find('\n', from), evidence.size());
+            auto line = evidence.substr(from, end - from);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '.'))
+              line.remove_suffix(1);
+            cause += " Broken layer: " + std::string(line) + ".";
+            break;
+          }
+        return Diagnosis{std::move(cause), std::string(rule.advice)};
+      }
   return std::nullopt;
 }
 } // namespace venture::launcher

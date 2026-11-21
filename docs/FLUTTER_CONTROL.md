@@ -120,3 +120,41 @@ Run `ctest --test-dir build/windows-release --output-on-failure -R
 an isolated legal APK fixture and uses a launch probe, not a real PC VR game.
 Real headset import, Vulkan/OpenXR rendering, audio and controller operation
 require hardware acceptance testing.
+
+## Upstream v0.2.5.1 merge
+
+`questtool_v0.2.5.1` merges upstream tag `v0.2.5.1`
+(`f88cc2b7fb2556887926c637d21d037c1ea6856a`,
+`https://github.com/Villagers654/Venture.git`) into QuestTool's `questtool`
+integration (`b42370cdf8d6ad2f5ae2bac8e8ef9dd8e3124798`).
+
+The control executable, settings JSON API, explicit installation selection,
+local identity and installation-file handling remain available. Unlike the
+upstream GUI, QuestTool continues to accept a persisted `runtimeExecutable`
+override; missing executables fall back to the bundled runtime. Upstream's
+`VENTURE_RUNTIME` development override is also supported.
+
+Save import keeps QuestTool's pinned-version storage and uses upstream's shared
+headset selection and backup timestamp handling, alongside the new save export
+implementation. NSD uses upstream's fuller API implementation, without duplicate
+Context registrations; the QuestTool NSD regression fixture is retained. The
+upstream JRE EC crypto module fix is included in core-only release packaging.
+
+Merge verification (Windows, runtime and GUI disabled in the verification build):
+
+- Built `venture-control`, `venture-cli`, `venture_control_tests`,
+  `venture_local_user_tests` and `venture_passthrough_launch_probe` in
+  `build/questtool-merge-check`.
+- CTest `control_install`, `control_rpc`, `local_user_broker` and
+  `launcher_settings_cli` passed. The RPC suite checks modified installation
+  files, per-install selection, startup readiness, settings and save import.
+- Separately linked `test_launcher.cpp` against the launcher core: all 43 tests
+  (456 assertions) passed, including the retained runtime override, missing-file
+  scanning and save backup behavior.
+- Compiled all 586 framework/bridge Java sources and the 21 CMake-listed Java
+  fixtures with the pinned JDK; `FrameworkTest`, `NsdTest` and
+  `AndroidKeyStoreTest` passed. `tests/jre_modules_test.py` passed both tests.
+
+The monolithic `venture_tests` target does not link with the runtime disabled:
+its HLE/loader tests require runtime symbols. This verification does not cover a
+complete runtime/Release build or actual Vulkan/OpenXR gameplay.

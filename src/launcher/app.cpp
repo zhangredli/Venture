@@ -86,8 +86,6 @@ void App::fit_window() {
 }
 App::App(Options options) : Core(std::move(options)) {
   settings_games_ = paths::utf8(settings_.games);
-  settings_runtime_ =
-      settings_.runtime_override() ? paths::utf8(settings_.runtime) : "";
   settings_adb_ = paths::utf8(settings_.adb);
   settings_key_hex_ = settings_.key_color;
   prefer_native_video_driver();
@@ -145,6 +143,11 @@ App::App(Options options) : Core(std::move(options)) {
     SDL_ShowWindow(window_);
   if (options_.smoke_view == "downloads")
     page_ = 1;
+  // The library searched for the text after ':' (library-search:, library-hover:,
+  // library-menu:), for screenshots of particular cards.
+  if (const auto colon = options_.smoke_view.find(':');
+      options_.smoke_view.starts_with("library-") && colon != std::string::npos)
+    search_ = options_.smoke_view.substr(colon + 1);
   if (options_.smoke_view == "settings" || options_.smoke_view == "settings-end" ||
       options_.smoke_view == "settings-runtime")
     page_ = 2;
@@ -365,10 +368,6 @@ void App::smoke_import() {
 void App::save_settings(bool announce) {
   auto next = settings_;
   next.games = paths::from_utf8(settings_games_).lexically_normal();
-  // An empty runtime field means the runtime beside the launcher.
-  next.runtime = settings_runtime_.empty()
-                     ? library::Settings::defaults(data_).runtime
-                     : paths::from_utf8(settings_runtime_).lexically_normal();
   next.adb = settings_adb_.empty()
                  ? fs::path{}
                  : paths::from_utf8(settings_adb_).lexically_normal();
@@ -652,7 +651,8 @@ int App::run() {
       const auto& v = options_.smoke_view;
       // A pinned version's page has no game entry of its own.
       const auto* g = game(options_.smoke_select);
-      if (v == "install" && g)
+      // An installed game installs (updates) at once, so it gets no dialog here.
+      if (v == "install" && g && !installed(g->id, false))
         action([&] { request_install(*g); });
       if (options_.smoke_view == "saves") save_import_target_ = options_.smoke_select;
       // The other confirmations and notices, opened for screenshots (nothing is acted on).

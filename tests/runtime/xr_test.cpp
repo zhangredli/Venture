@@ -18,6 +18,7 @@ using EGLenum = unsigned int;
 #include "hle/libc/vfs.h"
 #include "hle/openxr/openxr.h"
 #include "hle/openxr/state.h"
+#include "hle/openxr/layer_layout.h"
 #include "xr/bindings.h"
 #include "xr/clock.h"
 #include "xr/frame_hitches.h"
@@ -57,7 +58,7 @@ struct XrForwardingFixture {
   venture::xr::HostXr& host = venture::xr::host_xr();
   void* original = host.get_instance_proc_addr;
   inline static XrForwardingFixture* active = nullptr;
-  std::atomic<unsigned> boolean_resolves{0}, sync_resolves{0}, missing_resolves{0}, boolean_calls{0};
+  std::atomic<unsigned> bounds_resolves{0}, sync_resolves{0}, missing_resolves{0};
   bool second = false, missing = false, transient = false;
   XrInstance instance{};
   XrSession session = reinterpret_cast<XrSession>(0x3330);
@@ -79,20 +80,17 @@ struct XrForwardingFixture {
     if (XR_SUCCEEDED(result)) venture::hle::openxr::track_handle(session, "XrSession", instance);
     return result;
   }
-  static XrResult XRAPI_CALL first(XrSession, const XrActionStateGetInfo*, XrActionStateBoolean* out) {
-    ++active->boolean_calls;
-    out->currentState = XR_TRUE; out->changedSinceLastSync = XR_TRUE;
-    out->isActive = XR_TRUE; out->lastChangeTime = 1234; return XR_SUCCESS;
+  static XrResult XRAPI_CALL first(XrSession, XrReferenceSpaceType, XrExtent2Df* out) {
+    *out = {1234, 1}; return XR_SUCCESS;
   }
-  static XrResult XRAPI_CALL next(XrSession, const XrActionStateGetInfo*, XrActionStateBoolean* out) {
-    out->currentState = XR_FALSE; out->changedSinceLastSync = XR_FALSE;
-    out->isActive = XR_TRUE; out->lastChangeTime = 4321; return XR_SUCCESS;
+  static XrResult XRAPI_CALL next(XrSession, XrReferenceSpaceType, XrExtent2Df* out) {
+    *out = {4321, 0}; return XR_SUCCESS;
   }
   static XrResult XRAPI_CALL sync(XrSession, const XrActionsSyncInfo*) { return XR_SUCCESS; }
   static XrResult XRAPI_CALL resolve(XrInstance, const char* name, PFN_xrVoidFunction* out) {
     *out = nullptr;
-    if (std::strcmp(name, "xrGetActionStateBoolean") == 0) {
-      ++active->boolean_resolves;
+    if (std::strcmp(name, "xrGetReferenceSpaceBoundsRect") == 0) {
+      ++active->bounds_resolves;
       if (active->transient) { active->transient = false; return XR_ERROR_OUT_OF_MEMORY; }
       if (active->missing) return XR_ERROR_FUNCTION_UNSUPPORTED;
       *out = reinterpret_cast<PFN_xrVoidFunction>(active->second ? next : first);
@@ -198,70 +196,47 @@ TEST_CASE("Aggregate vibration falls back when native subaction roots are unsupp
   REQUIRE(::xrDestroyAction(action) == XR_SUCCESS);
 }
 TEST_CASE("XR forwarding slots retain results and refresh after instance recreation") {
-  XrForwardingFixture fixture;
-  REQUIRE(fixture.create() == XR_SUCCESS);
-  XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-  XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
-  for (unsigned i = 0; i < 100; ++i) {
-    REQUIRE(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-    CHECK(value.currentState == XR_TRUE); CHECK(value.changedSinceLastSync == XR_TRUE);
-    CHECK(value.isActive == XR_TRUE); CHECK(value.lastChangeTime == 1234);
-  }
-  CHECK(fixture.boolean_resolves == 1);
-  value.type = XR_TYPE_ACTION_STATE_FLOAT;
-  CHECK(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_ERROR_VALIDATION_FAILURE);
-  CHECK(fixture.boolean_resolves == 1);
-  value.type = XR_TYPE_ACTION_STATE_BOOLEAN;
-  REQUIRE(venture::hle::openxr::guest::xrDestroyInstance(fixture.instance) == XR_SUCCESS);
-  fixture.instance = {};
-  CHECK(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_ERROR_HANDLE_INVALID);
-  CHECK(fixture.boolean_resolves == 1);
-  fixture.second = true;
-  fixture.session = reinterpret_cast<XrSession>(0x4440);
-  REQUIRE(fixture.create() == XR_SUCCESS);
-  REQUIRE(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-  CHECK(value.currentState == XR_FALSE); CHECK(value.changedSinceLastSync == XR_FALSE);
-  CHECK(value.isActive == XR_TRUE); CHECK(value.lastChangeTime == 4321);
-  CHECK(fixture.boolean_resolves == 2);
-}
-TEST_CASE("XR action reads reuse the host answer until the next sync") {
   namespace xg = venture::hle::openxr::guest;
   XrForwardingFixture fixture;
   REQUIRE(fixture.create() == XR_SUCCESS);
-  XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-  XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
-  for (unsigned i = 0; i < 10; ++i) {
-    value.lastChangeTime = 0;
-    REQUIRE(xg::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-    CHECK(value.currentState == XR_TRUE); CHECK(value.lastChangeTime == 1234);
+  constexpr auto stage = XR_REFERENCE_SPACE_TYPE_STAGE;
+  XrExtent2Df bounds{};
+  for (unsigned i = 0; i < 100; ++i) {
+    bounds = {};
+    REQUIRE(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_SUCCESS);
+    CHECK(bounds.width == 1234); CHECK(bounds.height == 1);
   }
-  CHECK(fixture.boolean_calls == 1);
-  XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
-  REQUIRE(xg::xrSyncActions(fixture.session, &sync) == XR_SUCCESS);
-  REQUIRE(xg::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-  CHECK(fixture.boolean_calls == 2);
-  info.subactionPath = 7; // each subaction path is its own read
-  REQUIRE(xg::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-  REQUIRE(xg::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-  CHECK(fixture.boolean_calls == 3);
+  CHECK(fixture.bounds_resolves == 1);
+  CHECK(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, nullptr) == XR_ERROR_VALIDATION_FAILURE);
+  CHECK(fixture.bounds_resolves == 1);
+  REQUIRE(xg::xrDestroyInstance(fixture.instance) == XR_SUCCESS);
+  fixture.instance = {};
+  CHECK(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_ERROR_HANDLE_INVALID);
+  CHECK(fixture.bounds_resolves == 1);
+  fixture.second = true;
+  fixture.session = reinterpret_cast<XrSession>(0x4440);
+  REQUIRE(fixture.create() == XR_SUCCESS);
+  REQUIRE(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_SUCCESS);
+  CHECK(bounds.width == 4321); CHECK(bounds.height == 0);
+  CHECK(fixture.bounds_resolves == 2);
 }
 TEST_CASE("XR forwarding caches missing procedures but retries transient lookup errors") {
+  namespace xg = venture::hle::openxr::guest;
   XrForwardingFixture fixture;
   fixture.missing = true;
   REQUIRE(fixture.create() == XR_SUCCESS);
-  XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-  XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
-  value.lastChangeTime = 99;
+  constexpr auto stage = XR_REFERENCE_SPACE_TYPE_STAGE;
+  XrExtent2Df bounds{99, 99};
   for (unsigned i = 0; i < 100; ++i)
-    CHECK(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_ERROR_FUNCTION_UNSUPPORTED);
-  CHECK(value.lastChangeTime == 99); CHECK(fixture.boolean_resolves == 1);
-  REQUIRE(venture::hle::openxr::guest::xrDestroyInstance(fixture.instance) == XR_SUCCESS);
+    CHECK(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_ERROR_FUNCTION_UNSUPPORTED);
+  CHECK(bounds.width == 99); CHECK(fixture.bounds_resolves == 1);
+  REQUIRE(xg::xrDestroyInstance(fixture.instance) == XR_SUCCESS);
   fixture.instance = {};
   fixture.missing = false; fixture.transient = true;
   REQUIRE(fixture.create() == XR_SUCCESS);
-  CHECK(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_ERROR_FUNCTION_UNSUPPORTED);
-  REQUIRE(venture::hle::openxr::guest::xrGetActionStateBoolean(fixture.session, &info, &value) == XR_SUCCESS);
-  CHECK(value.lastChangeTime == 1234); CHECK(fixture.boolean_resolves == 3);
+  CHECK(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_ERROR_FUNCTION_UNSUPPORTED);
+  REQUIRE(xg::xrGetReferenceSpaceBoundsRect(fixture.session, stage, &bounds) == XR_SUCCESS);
+  CHECK(bounds.width == 1234); CHECK(fixture.bounds_resolves == 3);
 }
 TEST_CASE("XR forwarding resolves one shared procedure across threads and distinguishes names") {
   XrForwardingFixture fixture;
@@ -286,24 +261,22 @@ TEST_CASE("XR forwarding slots follow host instance and loader replacement") {
     XrInstance instance;
     ~RestoreInstance() { host.instance = instance; }
   } restore{fixture.host, original_instance};
-  XrActionStateGetInfo info{XR_TYPE_ACTION_STATE_GET_INFO};
-  XrActionStateBoolean value{XR_TYPE_ACTION_STATE_BOOLEAN};
-  REQUIRE((venture::xr::host_call<PFN_xrGetActionStateBoolean, "xrGetActionStateBoolean">(
-      fixture.session, &info, &value)) == XR_SUCCESS);
-  CHECK(value.currentState == XR_TRUE);
+  constexpr auto stage = XR_REFERENCE_SPACE_TYPE_STAGE;
+  XrExtent2Df bounds{};
+  using Bounds = PFN_xrGetReferenceSpaceBoundsRect;
+  REQUIRE((venture::xr::host_call<Bounds, "xrGetReferenceSpaceBoundsRect">(fixture.session, stage, &bounds)) == XR_SUCCESS);
+  CHECK(bounds.width == 1234);
   fixture.second = true;
   fixture.host.instance = reinterpret_cast<XrInstance>(0x7770);
-  REQUIRE((venture::xr::host_call<PFN_xrGetActionStateBoolean, "xrGetActionStateBoolean">(
-      fixture.session, &info, &value)) == XR_SUCCESS);
-  CHECK(value.currentState == XR_FALSE);
-  CHECK(fixture.boolean_resolves == 2);
+  REQUIRE((venture::xr::host_call<Bounds, "xrGetReferenceSpaceBoundsRect">(fixture.session, stage, &bounds)) == XR_SUCCESS);
+  CHECK(bounds.width == 4321);
+  CHECK(fixture.bounds_resolves == 2);
   fixture.host.get_instance_proc_addr = nullptr;
-  CHECK((venture::xr::host_call<PFN_xrGetActionStateBoolean, "xrGetActionStateBoolean">(
-      fixture.session, &info, &value)) == XR_ERROR_FUNCTION_UNSUPPORTED);
+  CHECK((venture::xr::host_call<Bounds, "xrGetReferenceSpaceBoundsRect">(fixture.session, stage, &bounds)) ==
+        XR_ERROR_FUNCTION_UNSUPPORTED);
   fixture.host.get_instance_proc_addr = reinterpret_cast<void*>(XrForwardingFixture::resolve);
-  REQUIRE((venture::xr::host_call<PFN_xrGetActionStateBoolean, "xrGetActionStateBoolean">(
-      fixture.session, &info, &value)) == XR_SUCCESS);
-  CHECK(fixture.boolean_resolves == 3);
+  REQUIRE((venture::xr::host_call<Bounds, "xrGetReferenceSpaceBoundsRect">(fixture.session, stage, &bounds)) == XR_SUCCESS);
+  CHECK(fixture.bounds_resolves == 3);
 }
 
 TEST_CASE("Display timing distinguishes startup, measured modes and prediction jitter") {
@@ -1805,6 +1778,74 @@ TEST_CASE("XR GLES swapchains upload staged layers and fail creation, not releas
   CHECK(xg::xrDestroySession(session) == XR_SUCCESS);
   CHECK(xg::xrDestroyInstance(instance) == XR_SUCCESS);
   venture::xr::install_xr_images(nullptr);
+}
+
+TEST_CASE("XR layer arrangements are described once, when they change, with chained structures the guest did not enable") {
+  // A black menu in a report shows what the game submitted at that menu.
+  const auto eyes = reinterpret_cast<XrSwapchain>(std::uintptr_t(0x10));
+  const auto panel = reinterpret_cast<XrSwapchain>(std::uintptr_t(0x20));
+  const auto space = reinterpret_cast<XrSpace>(std::uintptr_t(77));
+  const venture::hle::openxr::LayerLayoutQueries queries{
+      [&](XrSwapchain chain) -> std::optional<XrExtent2Di> {
+        if (chain == eyes) return XrExtent2Di{100, 90};
+        if (chain == panel) return XrExtent2Di{64, 32};
+        return std::nullopt;
+      },
+      [](const char*) { return false; }};
+  std::array<XrCompositionLayerProjectionView, 2> views{};
+  for (std::uint32_t i = 0; i < 2; ++i)
+    views[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW, nullptr, {}, {}, {eyes, {{0, 0}, {100, 90}}, i}};
+  XrCompositionLayerProjection projection{XR_TYPE_COMPOSITION_LAYER_PROJECTION, nullptr, 0, space, 2, views.data()};
+  XrCompositionLayerColorScaleBiasKHR fade{XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR};
+  XrCompositionLayerQuad quad{XR_TYPE_COMPOSITION_LAYER_QUAD, &fade, XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT,
+                              space, XR_EYE_VISIBILITY_BOTH, {panel, {{0, 0}, {64, 32}}, 0},
+                              {{0, 0.7071068f, 0, 0.7071068f}, {0, 1, -2}}, {2, 1}};
+  std::array<const XrCompositionLayerBaseHeader*, 2> both{
+      reinterpret_cast<const XrCompositionLayerBaseHeader*>(&projection),
+      reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quad)};
+  XrFrameEndInfo menu{XR_TYPE_FRAME_END_INFO, nullptr, 1, XR_ENVIRONMENT_BLEND_MODE_OPAQUE, 2, both.data()};
+  XrFrameEndInfo game = menu;
+  game.layerCount = 1;
+  venture::hle::openxr::LayerLayouts layouts;
+  const auto first = layouts.change(game, queries);
+  REQUIRE(first);
+  CHECK(*first == "layers arrangement #1: 1 layer, blend mode 1; [0] projection flags=0x0 space=77 "
+                  "view 0 chain 100x90 slice 0 rect 100x90 view 1 chain 100x90 slice 1 rect 100x90");
+  CHECK_FALSE(layouts.change(game, queries));
+  // Dynamic resolution is not a change.
+  views[0].subImage.imageRect.extent.width = views[1].subImage.imageRect.extent.width = 80;
+  CHECK_FALSE(layouts.change(game, queries));
+  const auto opened = layouts.change(menu, queries);
+  REQUIRE(opened);
+  CHECK(opened->starts_with("layers arrangement #2: 2 layers, blend mode 1; [0] projection flags=0x0 space=77 view 0 chain 100x90 slice 0 rect 80x90"));
+  CHECK(opened->ends_with("; [1] quad flags=0x2 space=77 eye both chain 64x32 slice 0 rect 64x32 2.00x1.00 m at (0.00,1.00,-2.00)"
+                          " rot (0.00,0.71,0.00,0.71)"
+                          " +XrCompositionLayerColorScaleBiasKHR (not enabled)"));
+  // A moving or turning panel is not a change either (the orientation is named
+  // because a panel turned edge-on shows as a thin strip); a return to the game
+  // is named by number.
+  quad.pose.position.z = -3;
+  quad.pose.orientation = {0, 0, 0, 1};
+  CHECK_FALSE(layouts.change(menu, queries));
+  CHECK(layouts.change(game, queries) == "layers back to arrangement #1");
+  CHECK(layouts.change(menu, queries) == "layers back to arrangement #2");
+  CHECK(venture::hle::openxr::layer_type_list(both) == "projection, quad");
+  CHECK(venture::hle::openxr::layer_type_list({}) == "none");
+  // Chains are read before validation rejects a cycle: the walk stops.
+  XrCompositionLayerImageLayoutFB loop{XR_TYPE_COMPOSITION_LAYER_IMAGE_LAYOUT_FB};
+  loop.next = &loop;
+  quad.next = &loop;
+  venture::hle::openxr::LayerLayouts cyclic;
+  const auto described = cyclic.change(menu, queries);
+  REQUIRE(described);
+  CHECK(described->ends_with("+XrCompositionLayerImageLayoutFB (not enabled) +..."));
+  CHECK_FALSE(cyclic.change(menu, queries));
+  quad.next = &fade;
+  // Reports stop at the limit.
+  for (unsigned i = 0; i < venture::hle::openxr::LayerLayouts::kMaxReports; ++i)
+    (void)layouts.change(i % 2 ? menu : game, queries);
+  CHECK_FALSE(layouts.change(game, queries));
+  CHECK_FALSE(layouts.change(menu, queries));
 }
 
 TEST_CASE("XR draws guest cylinders a host cannot compose at their true arc, honoring the FB vertical flip") {
@@ -3806,9 +3847,10 @@ TEST_CASE("XR guest lifecycle and real Vulkan swapchain through mock loader") {
   CHECK(xg::xrDestroySpace(static_space) == XR_SUCCESS);
   CHECK(xg::xrDestroySwapchain(static_chain) == XR_SUCCESS);
   CHECK(xg::xrDestroySwapchain(chain) == XR_SUCCESS);
+  // Host chains stay parked for reuse until the session ends (dev_dump.cpp).
+  CHECK(xg::xrDestroySession(session) == XR_SUCCESS);
   CHECK(ventureMockXrStats().live_images == 0);
   for (const auto& image : images) CHECK(venture::vulkan::attachment_extent(image.image).width == 0);
-  CHECK(xg::xrDestroySession(session) == XR_SUCCESS);
   CHECK(xg::xrDestroyInstance(instance) == XR_SUCCESS);
 }
 
@@ -5132,6 +5174,28 @@ TEST_CASE("the desktop mirror gets a low-priority queue of its own beside the ga
     CHECK_FALSE(venture::xr::mirror_queue(device));
   }
   venture::xr::forget_mirror_queue(device);
+}
+TEST_CASE("XR Android display covers both eyes with a Quest's panel headroom") {
+  using venture::xr::android_display_size;
+  // Quest 3: 1680x1760 eyes on 2064x2208 panels (4128x2208 display); close to 5/4.
+  auto size = android_display_size({1680, 1760});
+  CHECK(size.width == 4200);
+  CHECK(size.height == 2200);
+  // A PC VR eye larger than 1920x1080 (Star Wars: Tales from the Galaxy's Edge
+  // drew only the bottom-left 1920x1080 of its 2800x2864 eye): the display
+  // covers the eye and the rows an engine rounds it up by.
+  size = android_display_size({2800, 2856});
+  CHECK(size.width == 7000);
+  CHECK(size.height == 3570);
+  CHECK(size.height >= 2864);
+  // Odd sides round up to even pixels.
+  size = android_display_size({2801, 1001});
+  CHECK(size.width == 2 * 3502);
+  CHECK(size.height == 1252);
+  // No host views: the previous fixed window.
+  size = android_display_size({});
+  CHECK(size.width == 1920);
+  CHECK(size.height == 1080);
 }
 TEST_CASE("XR display overrides parse the launcher's settings, clamp sizes and pick only listed rates") {
   using venture::xr::parse_display_override;

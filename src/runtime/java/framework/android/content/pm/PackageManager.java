@@ -23,30 +23,57 @@ public class PackageManager {
   public PackageManager(PackageModel m) {
     model = m;
   }
-  public ApplicationInfo getApplicationInfo(String pkg, int flags) throws NameNotFoundException {
-    // Unity's built-in Oculus provider checks this package after reading the
-    // application's vr_only/vr_dual metadata. Venture supplies the runtime
-    // through libvrapi HLE, so expose that system-runtime package's identity.
-    // It has no launchable Activity or bindable service in this framework.
-    if ("com.oculus.systemactivities".equals(pkg)) {
-      ApplicationInfo runtime = new ApplicationInfo();
-      runtime.packageName = pkg;
-      runtime.processName = pkg;
-      runtime.className = "android.app.Application";
-      runtime.name = runtime.className;
-      runtime.flags = ApplicationInfo.FLAG_SYSTEM;
-      runtime.nativeLibraryDir = "/system/lib64";
-      return runtime;
+  // System packages a Quest has that games look up. Unity's built-in Oculus
+  // provider checks com.oculus.systemactivities after reading the application's
+  // vr_only/vr_dual metadata (Venture supplies that runtime through libvrapi HLE).
+  // Meta's OpenXR loader loads com.oculus.systemdriver.DriverLoader through the
+  // system driver's package context (Context.createPackageContext). Neither has a
+  // launchable Activity or bindable service in this framework. Null for any
+  // other package.
+  public static ApplicationInfo systemApplicationInfo(String pkg) {
+    ApplicationInfo info = new ApplicationInfo();
+    switch (pkg == null ? "" : pkg) {
+      case "com.oculus.systemactivities" -> info.nativeLibraryDir = "/system/lib64";
+      case "com.oculus.systemdriver" -> {
+        info.sourceDir = "/system/priv-app/VrDriver/VrDriver.apk";
+        info.publicSourceDir = info.sourceDir;
+        info.nativeLibraryDir = "/system/priv-app/VrDriver/lib/arm64";
+        info.uid = 1000;
+      }
+      default -> { return null; }
     }
+    info.packageName = pkg;
+    info.processName = pkg;
+    info.className = "android.app.Application";
+    info.name = info.className;
+    info.flags = ApplicationInfo.FLAG_SYSTEM;
+    return info;
+  }
+  public ApplicationInfo getApplicationInfo(String pkg, int flags) throws NameNotFoundException {
+    ApplicationInfo system = systemApplicationInfo(pkg);
+    if (system != null) return system;
     check(pkg);
     return model.info.applicationInfo;
   }
   public PackageInfo getPackageInfo(String pkg, int flags) throws NameNotFoundException {
+    ApplicationInfo system = systemApplicationInfo(pkg);
+    if (system != null) {
+      PackageInfo info = new PackageInfo();
+      info.packageName = pkg;
+      info.applicationInfo = system;
+      return info;
+    }
     check(pkg);
+    int[] granted = new int[model.info.requestedPermissions.length];
+    for (int i = 0; i < granted.length; ++i)
+      granted[i] = checkPermission(model.info.requestedPermissions[i], pkg) == PERMISSION_GRANTED
+          ? PackageInfo.REQUESTED_PERMISSION_GRANTED : 0;
+    model.info.requestedPermissionsFlags = granted;
     if ((flags & (GET_SIGNATURES | GET_SIGNING_CERTIFICATES)) != 0) {
       try {
-        model.info.signatures = ApkSignatures.read(RuntimeEnvironment.get().apk);
-        model.info.signingInfo = new SigningInfo(model.info.signatures);
+        var signing = ApkSignatures.details(RuntimeEnvironment.get().apk);
+        model.info.signatures = signing.signers();
+        model.info.signingInfo = new SigningInfo(signing.signers(), signing.history());
       } catch (java.io.IOException e) {
         throw new IllegalStateException("Cannot read APK signer certificates", e);
       }
@@ -133,6 +160,14 @@ public class PackageManager {
   }
   // Installing other packages is the launcher's job, never the game's.
   public boolean canRequestPackageInstalls() {
+    return false;
+  }
+  // A game is an installed APK, never an instant app (Firebase Analytics asks
+  // at start; Pickleball One stopped on the missing method).
+  public boolean isInstantApp() {
+    return false;
+  }
+  public boolean isInstantApp(String pkg) {
     return false;
   }
   public Intent getLaunchIntentForPackage(String pkg) {
@@ -223,6 +258,11 @@ public class PackageManager {
     } catch (NameNotFoundException e) {
       throw new IllegalStateException(e);
     }
+  }
+  public java.util.List<ApplicationInfo> getInstalledApplications(int flags) {
+    var list = new java.util.ArrayList<ApplicationInfo>();
+    for (var info : getInstalledPackages(flags)) list.add(info.applicationInfo);
+    return list;
   }
   /** Services are matched by explicit component; this framework records no service intent filters. */
   public ResolveInfo resolveService(Intent intent, int flags) {
@@ -329,5 +369,10 @@ public class PackageManager {
   }
   public String getInstallerPackageName(String pkg) {
     return null;
+  }
+  // Talsec's start asks this (API 30); the same installer answer, or NameNotFound for other packages.
+  public InstallSourceInfo getInstallSourceInfo(String pkg) throws NameNotFoundException {
+    check(pkg);
+    return new InstallSourceInfo(getInstallerPackageName(pkg));
   }
 }

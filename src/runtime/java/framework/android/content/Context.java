@@ -16,7 +16,7 @@ public class Context {
   public static final String ACTIVITY_SERVICE = "activity", WINDOW_SERVICE = "window", AUDIO_SERVICE = "audio",
                              POWER_SERVICE = "power", INPUT_METHOD_SERVICE = "input_method",
                              VIBRATOR_SERVICE = "vibrator", VIBRATOR_MANAGER_SERVICE = "vibrator_manager",
-                             CONNECTIVITY_SERVICE = "connectivity", NSD_SERVICE = "servicediscovery",
+                             CONNECTIVITY_SERVICE = "connectivity",
                              TELEPHONY_SERVICE = "phone", CLIPBOARD_SERVICE = "clipboard",
                              BATTERY_SERVICE = "batterymanager", DISPLAY_SERVICE = "display";
   public static final String LOCATION_SERVICE = "location", BLUETOOTH_SERVICE = "bluetooth";
@@ -26,8 +26,10 @@ public class Context {
   public static final String USER_SERVICE = "user", WIFI_SERVICE = "wifi", JOB_SCHEDULER_SERVICE = "jobscheduler",
       STORAGE_SERVICE = "storage", ALARM_SERVICE = "alarm", NOTIFICATION_SERVICE = "notification",
       CAPTIONING_SERVICE = "captioning", MEDIA_METRICS_SERVICE = "media_metrics", LOCALE_SERVICE = "locale",
-      DOWNLOAD_SERVICE = "download",
-      GAME_SERVICE = "game";
+      DOWNLOAD_SERVICE = "download", NSD_SERVICE = "servicediscovery",
+      GAME_SERVICE = "game", ACCESSIBILITY_SERVICE = "accessibility", KEYGUARD_SERVICE = "keyguard",
+      USAGE_STATS_SERVICE = "usagestats", DEVICE_POLICY_SERVICE = "device_policy", BIOMETRIC_SERVICE = "biometric",
+      FINGERPRINT_SERVICE = "fingerprint";
   private static final Map<String, SharedPreferences> preferences =
       new java.util.concurrent.ConcurrentHashMap<>();
   // Dynamic receivers match process-wide, as ActivityManagerService does; each
@@ -230,7 +232,10 @@ public class Context {
   }
   // The app's own package gets a context for itself. Horizon's context is where
   // Avatar SDK 1 loaders find com.oculus.avatar.loader.EntryPoint (First Steps,
-  // Bogo); any other package is not installed, as on a Quest without it.
+  // Bogo). The system driver's context is where Meta's OpenXR loader finds
+  // com.oculus.systemdriver.DriverLoader: it has the system package's identity
+  // and the framework's class loader. Any other package is not installed, as on
+  // a Quest without it.
   public Context createPackageContext(String packageName, int flags)
       throws android.content.pm.PackageManager.NameNotFoundException {
     if (packageName != null && packageName.equals(getPackageName())) return ventureOuterContext();
@@ -238,6 +243,16 @@ public class Context {
       return new ContextWrapper(ventureOuterContext()) {
         @Override public String getPackageName() { return packageName; }
       };
+    if ("com.oculus.systemdriver".equals(packageName)) {
+      ApplicationInfo driver = android.content.pm.PackageManager.systemApplicationInfo(packageName);
+      return new ContextWrapper(ventureOuterContext()) {
+        @Override public String getPackageName() { return packageName; }
+        @Override public ApplicationInfo getApplicationInfo() { return driver; }
+        @Override public ClassLoader getClassLoader() {
+          return com.oculus.systemdriver.DriverLoader.class.getClassLoader();
+        }
+      };
+    }
     throw new android.content.pm.PackageManager.NameNotFoundException(packageName);
   }
   private static final class DisplayMetricsHolder {
@@ -274,7 +289,6 @@ public class Context {
       case VIBRATOR_MANAGER_SERVICE -> new VibratorManager(this);
       case TELEPHONY_SERVICE -> new android.telephony.TelephonyManager();
       case CONNECTIVITY_SERVICE -> new android.net.ConnectivityManager();
-      case NSD_SERVICE -> new android.net.nsd.NsdManager();
       case CLIPBOARD_SERVICE -> new ClipboardManager();
       case BATTERY_SERVICE -> new BatteryManager();
       case DISPLAY_SERVICE -> new android.hardware.display.DisplayManager();
@@ -286,6 +300,12 @@ public class Context {
       case ALARM_SERVICE -> new android.app.AlarmManager();
       case NOTIFICATION_SERVICE -> new android.app.NotificationManager();
       case DOWNLOAD_SERVICE -> android.app.DownloadManager.ventureLocal(this);
+      case NSD_SERVICE -> new android.net.nsd.NsdManager();
+      case ACCESSIBILITY_SERVICE -> new android.view.accessibility.AccessibilityManager();
+      case KEYGUARD_SERVICE -> new android.app.KeyguardManager();
+      case USAGE_STATS_SERVICE -> new android.app.usage.UsageStatsManager();
+      case DEVICE_POLICY_SERVICE -> new android.app.admin.DevicePolicyManager();
+      case BIOMETRIC_SERVICE -> new android.hardware.biometrics.BiometricManager();
       default -> null;
     });
   }
@@ -311,7 +331,6 @@ public class Context {
       java.util.Map.entry(VibratorManager.class, VIBRATOR_MANAGER_SERVICE),
       java.util.Map.entry(android.telephony.TelephonyManager.class, TELEPHONY_SERVICE),
       java.util.Map.entry(android.net.ConnectivityManager.class, CONNECTIVITY_SERVICE),
-      java.util.Map.entry(android.net.nsd.NsdManager.class, NSD_SERVICE),
       java.util.Map.entry(ClipboardManager.class, CLIPBOARD_SERVICE),
       java.util.Map.entry(BatteryManager.class, BATTERY_SERVICE),
       java.util.Map.entry(android.hardware.display.DisplayManager.class, DISPLAY_SERVICE),
@@ -322,7 +341,14 @@ public class Context {
       java.util.Map.entry(android.os.storage.StorageManager.class, STORAGE_SERVICE),
       java.util.Map.entry(android.app.AlarmManager.class, ALARM_SERVICE),
       java.util.Map.entry(android.app.NotificationManager.class, NOTIFICATION_SERVICE),
-      java.util.Map.entry(android.app.DownloadManager.class, DOWNLOAD_SERVICE));
+      java.util.Map.entry(android.app.DownloadManager.class, DOWNLOAD_SERVICE),
+      java.util.Map.entry(android.net.nsd.NsdManager.class, NSD_SERVICE),
+      java.util.Map.entry(android.view.accessibility.AccessibilityManager.class, ACCESSIBILITY_SERVICE),
+      java.util.Map.entry(android.app.KeyguardManager.class, KEYGUARD_SERVICE),
+      java.util.Map.entry(android.app.usage.UsageStatsManager.class, USAGE_STATS_SERVICE),
+      java.util.Map.entry(android.app.admin.DevicePolicyManager.class, DEVICE_POLICY_SERVICE),
+      java.util.Map.entry(android.hardware.biometrics.BiometricManager.class, BIOMETRIC_SERVICE),
+      java.util.Map.entry(android.hardware.fingerprint.FingerprintManager.class, FINGERPRINT_SERVICE));
   public String getSystemServiceName(Class<?> serviceClass) {
     return SERVICE_NAMES.get(serviceClass);
   }
@@ -540,8 +566,38 @@ public class Context {
   public String getAttributionTag() {
     return null;
   }
+  // AOSP ContextImpl: the app uid, the op package and this context's tag, with the default token.
+  private volatile AttributionSource attributionSource;
+  public AttributionSource getAttributionSource() {
+    AttributionSource source = attributionSource;
+    if (source == null)
+      attributionSource = source = new AttributionSource.Builder(android.os.Process.myUid())
+          .setPackageName(getOpPackageName()).setAttributionTag(getAttributionTag()).build();
+    return source;
+  }
   public Context createAttributionContext(String attributionTag) {
-    return this;
+    return createContext(new ContextParams.Builder().setAttributionTag(attributionTag).build());
+  }
+  /** A context like this one whose attribution is the params' (they replace any it had). */
+  public Context createContext(ContextParams contextParams) {
+    return new AttributionContext(ventureOuterContext(), Objects.requireNonNull(contextParams));
+  }
+  private static final class AttributionContext extends ContextWrapper {
+    private final ContextParams params;
+    private final AttributionSource source;
+    AttributionContext(Context base, ContextParams params) {
+      super(base);
+      this.params = params;
+      source = new AttributionSource(android.os.Process.myUid(), base.getOpPackageName(), params.getAttributionTag(),
+          params.getRenouncedPermissions(), params.getNextAttributionSource());
+    }
+    @Override public String getAttributionTag() { return params.getAttributionTag(); }
+    @Override public AttributionSource getAttributionSource() { return source; }
+    @Override public ContextParams getParams() { return params; }
+  }
+  /** The params this context was created with, or null for an app or component context. */
+  public ContextParams getParams() {
+    return null;
   }
   public boolean isRestricted() {
     return false;

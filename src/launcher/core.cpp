@@ -166,9 +166,19 @@ void Core::start(bool refresh_library) {
 }
 bool Core::update_available(std::string_view id) const {
   const auto *local = installed(id);
-  auto detail = details_.find(std::string(id));
-  if (!local || detail == details_.end())
+  if (!local)
     return false;
+  auto detail = details_.find(std::string(id));
+  if (detail == details_.end()) {
+    // Until the details are read: a newer version code in the library listing.
+    // Pinned versions have their own id, so they never match a listing here.
+    const auto current = number(Json(local->plan.version_code));
+    uint64_t live = 0;
+    for (const auto &g : games_)
+      if (g.id == id)
+        live = std::max(live, number(Json(g.live_version_code)));
+    return current && live > current;
+  }
   auto live = number(Json(detail->second.version_code)), current = number(Json(local->plan.version_code));
   return live && current ? live > current
                          : (!detail->second.live_id.empty() && detail->second.live_id != local->plan.binary_id);
@@ -1398,6 +1408,12 @@ void Core::set_show_hidden(bool show) {
   settings_.show_hidden = show;
   settings_.save(data_);
 }
+// The library's Installed filter, remembered without a rescan.
+void Core::set_installed_only(bool installed_only) {
+  if (installed_only == settings_.installed_only) return;
+  settings_.installed_only = installed_only;
+  settings_.save(data_);
+}
 void Core::install_for_owner(const meta::Game &g, const fs::path &root) {
   const auto game_copy = g;
   const auto owner = owner_for(game_copy.id);
@@ -1531,6 +1547,16 @@ void Core::uninstall_addon(std::string_view app, std::string_view sku) {
                               sku);
   rescan();
 }
+// The game's lock, held while its saves are imported or sent; another import or
+// export, or the game running from another launcher, holds it already.
+static std::shared_ptr<FileLock> save_lock(const fs::path &data, const std::string &package) {
+  try {
+    return std::make_shared<FileLock>(data / "locks" / ("game-" + package + ".lock"), false);
+  } catch (...) {
+    throw std::runtime_error("This game's saves are in use: another save import or export is still running, "
+                             "or the game is open in another Venture window.");
+  }
+}
 Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &folder, std::string serial) {
   auto current = installed(app_id, false);
   if (!current) throw std::runtime_error("Install this game before importing its save data.");
@@ -1541,7 +1567,7 @@ Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &fol
   if (running != running_.end() && !running->second.exit)
     throw std::runtime_error("Close this game before importing its save data.");
   // Also keeps the game from starting until the import is done.
-  auto lock = std::make_shared<FileLock>(data_ / "locks" / ("game-" + package + ".lock"), false);
+  auto lock = save_lock(data_, package);
   auto key = launch_choice(app_id, play_key(app_id)).account_key;
   if (key.empty()) key = "local";
   if (!folder.empty())
@@ -1555,18 +1581,67 @@ Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &fol
   const auto adb = adb_path();
   if (adb.empty()) throw std::runtime_error("adb was not found. Install Android platform-tools, or set adb's location in Settings.");
   return [data = data_, key, package, adb, serial, lock, pin](std::stop_token stop) {
-    auto chosen = serial;
-    if (chosen.empty()) {
-      auto devices = android::adb::Client(adb).devices(stop);
-      auto ready = std::ranges::find_if(devices, &android::adb::Device::ready);
-      if (ready == devices.end())
-        throw std::runtime_error(devices.empty() ? "No headset found. Connect it with a USB cable (or turn on Wi-Fi "
-                                                   "debugging) and enable developer mode in the Meta Horizon app."
-                                                 : android::adb::state_message(devices.front()));
-      chosen = ready->serial;
-    }
-    return saves::import_headset(data, key, package, android::adb::Client(adb, chosen), stop, pin);
+    return saves::import_headset(data, key, package, headset(adb, serial, stop), stop, pin);
   };
+}
+android::adb::Client Core::headset(const fs::path &adb, std::string serial, std::stop_token stop) {
+  if (serial.empty()) {
+    auto devices = android::adb::Client(adb).devices(stop);
+    auto ready = std::ranges::find_if(devices, &android::adb::Device::ready);
+    if (ready == devices.end())
+      throw std::runtime_error(devices.empty() ? "No headset found. Connect it with a USB cable (or turn on Wi-Fi "
+                                                 "debugging) and enable developer mode in the Meta Horizon app."
+                                               : android::adb::state_message(devices.front()));
+    serial = ready->serial;
+  }
+  return android::adb::Client(adb, std::move(serial));
+}
+Core::SaveExport Core::export_saves(std::string_view app_id, std::string serial) {
+  auto current = installed(app_id, false);
+  if (!current) throw std::runtime_error("Install this game before sending its save data.");
+  if (current->plan.pinned) throw std::runtime_error("Save data exports come from the game's own install.");
+  const auto package = current->plan.package;
+  auto running = running_.find(std::string(app_id));
+  if (running != running_.end() && !running->second.exit)
+    throw std::runtime_error("Close this game before sending its save data.");
+  // Keeps the game from starting (and changing its saves) while they are sent.
+  auto lock = save_lock(data_, package);
+  auto key = launch_choice(app_id, play_key(app_id)).account_key;
+  if (key.empty()) key = "local";
+  const auto adb = adb_path();
+  if (adb.empty()) throw std::runtime_error("adb was not found. Install Android platform-tools, or set adb's location in Settings.");
+  return [data = data_, key, package, adb, serial, lock](std::stop_token stop) {
+    return saves::export_headset(data, key, package, headset(adb, serial, stop), stop);
+  };
+}
+void Core::export_saves_later(std::string_view app_id) {
+  auto task = export_saves(app_id);
+  notice_ = "Sending save data to the headset...";
+  import_worker_->submit([this, task = std::move(task)](std::stop_token stop) -> Worker::Completion {
+    std::string message;
+    bool sent = false;
+    try {
+      auto n = task(stop);
+      message = std::format("Sent {} save file{} to the headset.{}{}{}{}", n.files, n.files == 1 ? "" : "s",
+                            n.kept ? std::format(" {} {} the headset would not back up {} left unchanged (see the log).",
+                                                 n.kept, n.kept == 1 ? "file" : "files", n.kept == 1 ? "was" : "were")
+                                   : "",
+                            n.removed ? std::format(" Removed {} {} from the headset that Venture's copy doesn't have.",
+                                                    n.removed, n.removed == 1 ? "file" : "files")
+                                      : "",
+                            n.backup.empty() ? "" : " The headset's previous saves are kept in a backup.",
+                            n.has_private ? " Settings and saves the game keeps in private storage stay as they are "
+                                            "on the headset."
+                                          : "");
+      sent = true;
+    } catch (...) {
+      message = exception_text();
+    }
+    return [this, message, sent] {
+      if (sent) notice_ = message;
+      else error(message);
+    };
+  });
 }
 void Core::import_saves_later(std::string_view app_id, const fs::path &folder) {
   auto task = import_saves(app_id, folder);
@@ -1734,7 +1809,7 @@ void Core::launch_game(std::string_view id, std::string_view requested,
   const auto root = root_of(install);
   const bool console = settings_.console;
   if (settings_.runtime_override())
-    log::warn("launcher", "Using the runtime set in Settings: {}",
+    log::warn("launcher", "Using the runtime set by VENTURE_RUNTIME: {}",
               paths::utf8(runtime));
   notice_ = catalog_token.empty()
                 ? "Preparing application credentials..."
@@ -2251,6 +2326,11 @@ void Core::tick() {
           auto entry = game(id);
           r.failure = "It needs a Meta account. Use Sign in at the bottom left with the account that owns it, then "
                       "start it again.";
+          error(std::format("{} closed: {}", entry ? entry->name : id, r.failure));
+        } else if (library::refused_entitlement(r.log)) {
+          auto entry = game(id);
+          r.failure = "Meta says the signed-in account does not own it, and the game closed. Sign in with the "
+                      "account that bought it, then start it again.";
           error(std::format("{} closed: {}", entry ? entry->name : id, r.failure));
         } else if (library::needed_device_attestation(r.log)) {
           auto entry = game(id);

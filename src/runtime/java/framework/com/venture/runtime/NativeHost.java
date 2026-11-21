@@ -3,12 +3,14 @@ package com.venture.runtime;
 public final class NativeHost implements Host {
   public native byte[] readVirtualFile(byte[] path);
   public native boolean virtualFileExists(byte[] path);
+  public native String systemFont(String path);
   public native int setEnvironment(byte[] name, byte[] value, boolean overwrite);
   public native String guestErrorString(int error);
   public native void restartProcess();
   public native void restartProcess(byte[] launchIntent);
   public native byte[] coldLaunchIntent();
   public native int vulkanHardwareVersion();
+  public native String convertDex(String archive, String[] classPath);
   public native void setupShadersDiskCache(String cacheFile);
   public native int activeNetworkType();
   public native boolean hasInternetConnectivity();
@@ -25,6 +27,8 @@ public final class NativeHost implements Host {
   public static native void wakeLooper(long handle);
   // Guest address of the Avatar SDK 1 driver's function lookup (com.oculus.avatar.loader.EntryPoint).
   public static native long avatarDriver();
+  // Guest address of an export of Venture's OpenXR runtime library (com.oculus.systemdriver.DriverLoader).
+  public static native long openxrRuntimeProcAddr(String name);
   public native int guestTid();
   public native void beginProcessExit();
   public native void endProcessExit();

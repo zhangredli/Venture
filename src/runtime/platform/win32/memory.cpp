@@ -5,8 +5,10 @@
 #include <windows.h>
 #include <psapi.h>
 #include <io.h>
+#include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <string>
 #include <vector>
 
 namespace venture::platform {
@@ -152,6 +154,115 @@ bool memory_headroom(MemoryHeadroom& out) {
   }
   out = result;
   return true;
+}
+bool gpu_engine_times(std::vector<GpuEngineTime>& out) {
+  // PDH "\GPU Engine(pid_<pid>_luid_..._phys_N_eng_M_engtype_X)\Running Time", in 100 ns
+  // units. pdh.dll is loaded on first use; the query stays open and re-expands the
+  // wildcard on every collection, so engines first used later appear too.
+  out.clear();
+  struct RawCounter { DWORD status; FILETIME time; LONGLONG first, second; DWORD count; };
+  struct RawItem { wchar_t* name; RawCounter value; };
+  using Open = LONG (WINAPI*)(const wchar_t*, DWORD_PTR, HANDLE*);
+  using Add = LONG (WINAPI*)(HANDLE, const wchar_t*, DWORD_PTR, HANDLE*);
+  using Collect = LONG (WINAPI*)(HANDLE);
+  using Array = LONG (WINAPI*)(HANDLE, DWORD*, DWORD*, RawItem*);
+  struct Pdh {
+    Collect collect = nullptr;
+    Array array = nullptr;
+    HANDLE query = nullptr, counter = nullptr;
+    std::wstring prefix;
+  };
+  static const Pdh pdh = [] {
+    Pdh p;
+    const auto library = LoadLibraryExW(L"pdh.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!library) return p;
+    const auto open = reinterpret_cast<Open>(GetProcAddress(library, "PdhOpenQueryW"));
+    const auto add = reinterpret_cast<Add>(GetProcAddress(library, "PdhAddEnglishCounterW"));
+    p.collect = reinterpret_cast<Collect>(GetProcAddress(library, "PdhCollectQueryData"));
+    p.array = reinterpret_cast<Array>(GetProcAddress(library, "PdhGetRawCounterArrayW"));
+    p.prefix = L"pid_" + std::to_wstring(GetCurrentProcessId()) + L"_";
+    const auto path = L"\\GPU Engine(" + p.prefix + L"*)\\Running Time";
+    if (!open || !add || !p.collect || !p.array || open(nullptr, 0, &p.query) != 0 ||
+        add(p.query, path.c_str(), 0, &p.counter) != 0)
+      p.collect = nullptr;
+    return p;
+  }();
+  if (!pdh.collect || pdh.collect(pdh.query) != 0) return false;
+  DWORD bytes = 0, count = 0;
+  constexpr LONG more_data = static_cast<LONG>(0x800007D2);  // PDH_MORE_DATA
+  if (pdh.array(pdh.counter, &bytes, &count, nullptr) != more_data || !bytes) return false;
+  std::vector<std::byte> buffer(bytes);
+  auto* items = reinterpret_cast<RawItem*>(buffer.data());
+  if (pdh.array(pdh.counter, &bytes, &count, items) != 0) return false;
+  for (DWORD i = 0; i < count; ++i) {
+    std::wstring name = items[i].name ? items[i].name : L"";
+    if (name.rfind(pdh.prefix, 0) == 0) name.erase(0, pdh.prefix.size());
+    std::string engine(name.begin(), name.end());  // ASCII instance names
+    out.push_back({std::move(engine), static_cast<std::uint64_t>(items[i].value.first) * 100});  // wraps; diffs stay right
+  }
+  return !out.empty();
+}
+bool gpu_clock(const std::string& engine, GpuClock& out) {
+  // gpu_engine_times names an engine "luid_0x<high>_0x<low>_phys_<adapter>_eng_<node>_engtype_<type>".
+  // d3dkmthk.h: D3DKMTOpenAdapterFromLuid, D3DKMTQueryAdapterInfo with KMTQAITYPE_NODEPERFDATA (61)
+  // and KMTQAITYPE_ADAPTERPERFDATA (62); mingw's headers lack these, so they are declared here.
+  out = {};
+  unsigned long high = 0, low = 0;
+  unsigned adapter = 0, node = 0;
+  if (std::sscanf(engine.c_str(), "luid_0x%lx_0x%lx_phys_%u_eng_%u", &high, &low, &adapter, &node) != 4) return false;
+  struct OpenFromLuid { LUID luid; UINT adapter; };
+  struct Query { UINT adapter; int type; void* data; UINT size; };
+  struct NodePerf {
+    UINT32 node, physical_adapter;
+    ULONGLONG frequency, max_frequency, max_frequency_oc;
+    ULONG voltage, voltage_max, voltage_max_oc;
+    ULONGLONG max_transition_latency;
+  };
+  struct AdapterPerf {
+    UINT32 physical_adapter;
+    ULONGLONG memory_frequency, max_memory_frequency, max_memory_frequency_oc, memory_bandwidth, pcie_bandwidth;
+    ULONG fan_rpm, power, temperature;  // power in tenths of a percent, temperature in tenths of a degree C
+    UCHAR power_state_override;
+  };
+  using OpenFn = LONG (APIENTRY*)(OpenFromLuid*);
+  using QueryFn = LONG (APIENTRY*)(const Query*);
+  struct Kmt { OpenFn open = nullptr; QueryFn query = nullptr; };
+  static const Kmt kmt = [] {
+    Kmt k;
+    if (const auto gdi = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)) {
+      k.open = reinterpret_cast<OpenFn>(reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTOpenAdapterFromLuid")));
+      k.query = reinterpret_cast<QueryFn>(reinterpret_cast<void*>(GetProcAddress(gdi, "D3DKMTQueryAdapterInfo")));
+    }
+    return k;
+  }();
+  if (!kmt.open || !kmt.query) return false;
+  // One adapter handle per LUID for the process (the timeline asks once a minute).
+  static std::vector<std::pair<std::uint64_t, UINT>> opened;
+  const std::uint64_t key = std::uint64_t(high) << 32 | low;
+  UINT handle = 0;
+  if (const auto it = std::ranges::find(opened, key, &std::pair<std::uint64_t, UINT>::first); it != opened.end()) {
+    handle = it->second;
+  } else {
+    OpenFromLuid open{};
+    open.luid.HighPart = static_cast<LONG>(high);
+    open.luid.LowPart = static_cast<DWORD>(low);
+    if (kmt.open(&open) < 0) return false;
+    handle = open.adapter;
+    opened.emplace_back(key, handle);
+  }
+  NodePerf node_perf{};
+  node_perf.node = node;
+  node_perf.physical_adapter = adapter;
+  const Query node_query{handle, 61, &node_perf, sizeof(node_perf)};
+  if (kmt.query(&node_query) >= 0) {
+    out.hz = node_perf.frequency;
+    out.max_hz = node_perf.max_frequency;
+  }
+  AdapterPerf adapter_perf{};
+  adapter_perf.physical_adapter = adapter;
+  const Query adapter_query{handle, 62, &adapter_perf, sizeof(adapter_perf)};
+  if (kmt.query(&adapter_query) >= 0) out.celsius = adapter_perf.temperature / 10.0;
+  return out.hz || out.celsius > 0;
 }
 bool commit_charge(CommitCharge& out) {
   PERFORMANCE_INFORMATION system{};

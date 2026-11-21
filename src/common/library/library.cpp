@@ -195,6 +195,10 @@ void merge(std::vector<meta::Game> &games, const meta::Snapshot &s,
       g.publisher = known(&meta::Game::publisher);
     if (g.package.empty())
       g.package = known(&meta::Game::package);
+    if (g.live_id.empty() && g.live_version_code.empty()) {
+      g.live_id = known(&meta::Game::live_id);
+      g.live_version_code = known(&meta::Game::live_version_code);
+    }
     if (found == games.end())
       games.push_back(g);
     else {
@@ -224,6 +228,10 @@ std::vector<meta::Game> load(const fs::path &file) {
     g.platform = str(r, "platform");
     if (auto package = str(r, "package"); paths::safe_package(package))
       g.package = package;
+    if (auto id = str(r, "liveId"); digits(id))
+      g.live_id = id;
+    if (auto code = str(r, "liveVersionCode"); digits(code))
+      g.live_version_code = code;
     g.ownership_account = str(r, "accountId");
     if (g.ownership_account.starts_with("session:"))
       continue;
@@ -245,6 +253,8 @@ void save(const fs::path &file, const std::vector<meta::Game> &games) {
                     {"publisher", g.publisher},
                     {"platform", g.platform},
                     {"package", g.package},
+                    {"liveId", g.live_id},
+                    {"liveVersionCode", g.live_version_code},
                     {"owned", g.owned},
                     {"system", g.system},
                     {"accountId", g.ownership_account},
@@ -532,6 +542,24 @@ bool needed_meta_sign_in(const fs::path &log) {
   const bool waiting_for_user = recent.size() == 200 && polls >= 180 && last - first_poll >= 30;
   return init_failed && (frames < 10 || crashed_on_reply || waiting_for_user);
 }
+bool refused_entitlement(const fs::path &log) {
+  std::ifstream in(log, std::ios::binary);
+  double refused = -1, last = 0;
+  for (std::string line; std::getline(in, line);) {
+    // log::write lines start with "<seconds>.<ms>"; continuation lines do not.
+    char *end = nullptr;
+    const double at = std::strtod(line.c_str(), &end);
+    if (end == line.c_str() || at <= 0) continue;
+    last = at;
+    if (line.find("[ovrplatform] ovr_Entitlement_GetIsViewerEntitled request=") != std::string::npos) {
+      if (line.find(" error=-20002") != std::string::npos) refused = at;
+      else if (line.find(" completed") != std::string::npos) refused = -1;  // a later check passed
+    }
+  }
+  // Games that only note the refusal keep playing; one that closes soon after
+  // it (H3VR2 quits five seconds after its menu shows) was stopped by it.
+  return refused >= 0 && last - refused < 60;
+}
 bool needed_device_attestation(const fs::path &log) {
   std::ifstream in(log, std::ios::binary);
   double failed = -1, last = 0;
@@ -720,8 +748,12 @@ void rotate_log(const fs::path &log) {
   }
 }
 bool Settings::runtime_override() const {
-  return runtime.lexically_normal() !=
-         defaults({}).runtime.lexically_normal();
+#ifdef _WIN32
+  const auto bundled = paths::executable().parent_path() / "venture-runtime.exe";
+#else
+  const auto bundled = paths::executable().parent_path() / "venture-runtime";
+#endif
+  return runtime.lexically_normal() != bundled.lexically_normal();
 }
 std::vector<fs::path> Settings::roots() const {
   std::vector<fs::path> result{games};
@@ -730,15 +762,22 @@ std::vector<fs::path> Settings::roots() const {
       result.push_back(folder);
   return result;
 }
+// Use the bundled runtime by default. QuestTool also exposes an explicit
+// executable override; VENTURE_RUNTIME remains available for development.
 Settings Settings::defaults(const fs::path &data) {
 #ifdef _WIN32
-  return {data / "games",
-          paths::executable().parent_path() / "venture-runtime.exe", {}, 2,
-          false};
+  Settings s{data / "games",
+             paths::executable().parent_path() / "venture-runtime.exe", {}, 2,
+             false};
 #else
-  return {data / "games",
-          paths::executable().parent_path() / "venture-runtime", {}, 2, false};
+  Settings s{data / "games",
+             paths::executable().parent_path() / "venture-runtime", {}, 2, false};
 #endif
+  if (const auto* value = environment::getenv("VENTURE_RUNTIME"); value && *value) {
+    const auto runtime = paths::from_utf8(value);
+    if (runtime.is_absolute() && fs::exists(runtime)) s.runtime = runtime.lexically_normal();
+  }
+  return s;
 }
 bool Settings::texture_compression_warns(std::string_view before, std::string_view after) {
   return before == "always" && after != "always";
@@ -756,8 +795,7 @@ Settings Settings::from_json(const fs::path &data, const Json &j) {
        runtime = paths::from_utf8(str(j, "runtimeExecutable"));
   if (games.is_absolute())
     s.games = games.lexically_normal();
-  // A saved runtime that no longer exists (moved build, old install) falls back
-  // to the one shipped beside the launcher.
+  // Preserve QuestTool runtime overrides, falling back when an install moved.
   if (runtime.is_absolute() && fs::exists(runtime))
     s.runtime = runtime.lexically_normal();
   if (auto adb = paths::from_utf8(str(j, "adbExecutable")); adb.is_absolute())
@@ -825,6 +863,7 @@ Settings Settings::from_json(const fs::path &data, const Json &j) {
       if (id.is_string() && !id.get<std::string>().empty() && id.get<std::string>().size() <= 64)
         s.hidden.insert(id.get<std::string>());
   s.show_hidden = field(j, "showHiddenGames") == true;
+  s.installed_only = field(j, "libraryInstalledOnly") == true;
   return s;
 }
 Json Settings::json() const {
@@ -853,7 +892,8 @@ Json Settings::json() const {
          {"lookupImportsOnline", lookup_imports_online},
          {"steamSkip", steam_skip},
          {"hiddenGames", hidden},
-         {"showHiddenGames", show_hidden}};
+         {"showHiddenGames", show_hidden},
+         {"libraryInstalledOnly", installed_only}};
   {
     Json games = Json::object();
     for (const auto& [id, config] : game_controls) games[id] = Json::parse(controls::encode(config));
@@ -871,9 +911,8 @@ Json Settings::json() const {
       folders.push_back(paths::utf8(folder));
     j["libraryFolders"] = std::move(folders);
   }
-  // The bundled runtime is never pinned: a later launcher update brings its own.
-  if (runtime_override())
-    j["runtimeExecutable"] = paths::utf8(runtime);
+  // Never pin the bundled runtime across application upgrades.
+  if (runtime_override()) j["runtimeExecutable"] = paths::utf8(runtime);
   if (!adb.empty()) {
     if (!adb.is_absolute())
       throw std::runtime_error("Use an absolute path for adb.");

@@ -24,6 +24,7 @@ struct ControlsEdit {
   int menu_chord_ms = controls::kChordHoldMs;   // two buttons: how long both are held (0: at once)
   // Per Quest input and hand: the host inputs (index + 1) in the player's order; empty: not assigned.
   std::array<std::array<std::vector<int>, 8>, 2> host{};
+  bool grip_toggle = false;  // each grip press flips the game's grip held / released
   bool custom = false;  // per game: overrides the defaults
   bool initialized = false;
 };
@@ -65,7 +66,7 @@ private:
   std::string direct_app_;
   bool direct_started_ = false;
   std::string backdrop_; // game whose ambient art tints the game page
-  std::string search_, settings_games_, settings_runtime_, settings_adb_;
+  std::string search_, settings_games_, settings_adb_;
   // Settings > Runtime color key: the hex field's text, and Custom chosen
   // although the color matches a preset.
   std::string settings_key_hex_;
@@ -93,7 +94,7 @@ private:
   };
   std::map<const art::Image *, TurnedTexture> turned_textures_;
   SDL_Texture *turned_texture(const art::Image *image, const std::shared_ptr<const art::Shot> &shot);
-  bool installed_only_ = false, quit_ = false;
+  bool quit_ = false;
   ImVec2 card_menu_at_{};  // where a library card's menu opens
   std::string smoke_hovered_;  // --smoke-view library-hover: the card drawn hovered
   // Display settings rows, for Settings (global) or a game's Settings tab;
@@ -172,6 +173,9 @@ private:
   std::vector<std::pair<std::string, fs::path>> save_picks_;
   void choose_save_folder(const std::string &app_id);
   void draw_save_import();
+  // Export save data: confirm before sending to headset.
+  std::string save_export_target_;
+  void draw_save_export();
   // Link to store page...: the import whose dialog is open and the pasted link.
   std::string store_link_target_, store_link_text_;
   void draw_store_link();

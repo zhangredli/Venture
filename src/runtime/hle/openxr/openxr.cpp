@@ -1,3 +1,5 @@
+#include "core/wait.h"
+#include "core/session_timeline.h"
 #include "core/xr_call_trace.h"
 #include <atomic>
 #include "xr/haptic_sequence.h"
@@ -17,9 +19,11 @@
 #include "core/thread_runtime.h"
 #include "gfx/gpu_device.h"
 #include "hle/openxr/state.h"
+#include "hle/openxr/controller_layer.h"
 #include "xr/presentation.h"
 #include "hle/openxr/passthrough.h"
 #include "hle/openxr/sphere_layers.h"
+#include "hle/openxr/layer_layout.h"
 #include "hle/vulkan/vulkan.h"
 #include "hle/vulkan/timing.h"
 #include "platform/thread_priority.h"
@@ -551,22 +555,11 @@ XrResult xrDestroyInstance(XrInstance instance) {
     if (XR_FAILED(result))
       return result;
   }
-  std::vector<XrActionSet> sets;
-  for (const auto &[h, o] : state().objects)
-    if (o.type == "XrActionSet")
-      sets.push_back(reinterpret_cast<XrActionSet>(h.second));
-  for (auto set : sets) {
-    auto r = ::xrDestroyActionSet(set);
-    if (XR_FAILED(r))
-      return r;
-  }
+  controls::destroy_instance();
   state().timespec_instance.store(XrInstance{}, std::memory_order_release);
   forget_handle(instance);
   state().enabled.clear();
   state().instance_live = false;
-  state().guest_profiles.clear();
-  state().guest_suggestions.clear();
-  state().guest_sources.clear();
   state().events.clear();
   invalidate_host_procedures();
   if (shutdown_trace::enabled) log::info("shutdown", "xrDestroyInstance returned success");
@@ -825,6 +818,7 @@ XrResult xrDestroySession(XrSession handle) {
       return result;
   }
   destroy_retired_spaces(nullptr);
+  controls::reset_session(handle);
   venture::xr::cancel_sequence(handle);
   venture::xr::clear_haptic_bindings(handle);
   auto result = session().destroy(SessionOwner::openxr);
@@ -878,6 +872,7 @@ XrResult xrDestroySpace(XrSpace space) {
   std::lock_guard lock(state().mutex);
   if (!valid_handle(space, "XrSpace")) return XR_ERROR_HANDLE_INVALID;
   forget_handle(space);
+  controls::destroy_space(space);
   // The host copy stays until no submitted frame uses it (destroy_retired_spaces).
   if (session().handle) {
     state().retired_spaces.push_back(space);
@@ -997,6 +992,7 @@ XrResult xrPollEvent(XrInstance instance, XrEventDataBuffer *out) {
   if (result == XR_SUCCESS && out->type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
     venture::xr::clear_haptic_bindings(session().handle);
     venture::xr::note_menu_profiles_changed(session().handle);
+    controls::profiles_changed();
   }
   if (result == XR_SUCCESS && out->type == XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED) {
     auto e = reinterpret_cast<XrEventDataSessionStateChanged *>(out);
@@ -1177,6 +1173,44 @@ void fit_layer_limit(XrSession session, std::vector<const XrCompositionLayerBase
     if (!drop[i]) layers[out++] = layers[i];
   layers.resize(out);
 }
+// How each projection view reaches the host, logged when it changes (at most 8
+// times): the guest chain and slice the game submitted, the host chain, slice and
+// rect the host is given. A single-eye report then shows whether the second eye
+// names the slice the copy filled (prepare_swapchains copies every slice).
+void log_eye_routing(std::span<const XrCompositionLayerBaseHeader* const> host_layers) {
+  static std::string previous;
+  static unsigned reports = 0;
+  if (reports >= 8) return;
+  std::string line;
+  for (auto* layer : host_layers) {
+    if (!layer || layer->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION) continue;
+    const auto& projection = *reinterpret_cast<const XrCompositionLayerProjection*>(layer);
+    for (std::uint32_t i = 0; i < projection.viewCount && projection.views; ++i) {
+      const auto& sub = projection.views[i].subImage;
+      const Swapchain* guest = nullptr;
+      for (const auto& [handle, chain] : state().swapchains)
+        if (chain.host_handle && chain.host_handle == sub.swapchain) { guest = &chain; break; }
+      line += std::format("{}view {}: ", line.empty() ? "" : "; ", i);
+      if (guest)
+        line += std::format("guest {}x{} arrays={} format={} -> host {:#x} {}x{} arrays={} slice {} rect {}x{}+{}+{}",
+                            guest->info.width, guest->info.height, guest->info.arraySize, guest->info.format,
+                            reinterpret_cast<std::uintptr_t>(sub.swapchain), guest->host_info.width,
+                            guest->host_info.height, guest->host_info.arraySize, sub.imageArrayIndex,
+                            sub.imageRect.extent.width, sub.imageRect.extent.height, sub.imageRect.offset.x,
+                            sub.imageRect.offset.y);
+      else
+        line += std::format("host {:#x} (not a guest chain) slice {} rect {}x{}+{}+{}",
+                            reinterpret_cast<std::uintptr_t>(sub.swapchain), sub.imageArrayIndex,
+                            sub.imageRect.extent.width, sub.imageRect.extent.height, sub.imageRect.offset.x,
+                            sub.imageRect.offset.y);
+    }
+    break;  // the first projection layer carries the eyes
+  }
+  if (line.empty() || line == previous) return;
+  previous = line;
+  ++reports;
+  log::info("xr", "Eye routing: {}", line);
+}
 }  // namespace
 
 XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
@@ -1184,6 +1218,7 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
   return trace.finish([&]() -> XrResult {
   // The guest's whole call; the host runtime's share is the xr_end_frame record inside it.
   vulkan::ScopedHostWait timing("guest_end_frame");
+  const auto entered_ns = monotonic_ns();
   std::unique_lock lock(state().mutex);
   std::unique_lock sl(session().mutex);
   if (!valid_handle(handle, "XrSession"))
@@ -1204,6 +1239,23 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
   }
   trace.display(info->displayTime);
   trace.layers(info->layerCount);
+  // A changed layer arrangement is logged once, with the host layers it became.
+  struct LayoutReport {
+    std::optional<std::string> line;
+    std::string host = "the frame failed";
+    ~LayoutReport() { if (line) log::info("xr-layers", "{} -> host: {}", *line, host); }
+  } layout_report;
+  {
+    static LayerLayouts layouts;
+    const LayerLayoutQueries queries{
+        [](XrSwapchain chain) -> std::optional<XrExtent2Di> {
+          const auto found = state().swapchains.find(chain);
+          if (found == state().swapchains.end()) return std::nullopt;
+          return XrExtent2Di{std::int32_t(found->second.info.width), std::int32_t(found->second.info.height)};
+        },
+        [](const char* extension) { return enabled(extension); }};
+    layout_report.line = layouts.change(*info, queries);
+  }
   // Native composition must follow accepted work on the guest queue. Pump
   // issuance before taking a physical queue lock so other producers can enter.
   if (!state().gles && [] {
@@ -1236,6 +1288,7 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
       const auto result = make_passthrough_frame_opaque(handle, passthrough);
       if (XR_FAILED(result)) return result;
     }
+    layout_report.host = "the external passthrough source's frame";
     lock.unlock();
     const auto result = session().end(&passthrough.info);
     if (XR_FAILED(result) || result == XR_SESSION_LOSS_PENDING) {
@@ -1346,6 +1399,16 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
           }
       }
     }
+    // A layer in a hand's action space goes to the host space that hand's pose is at now.
+    if (const auto host_space = controls::located_space(mapped->space); host_space != mapped->space)
+      for (const auto& info : structure_metadata())
+        if (info.type == mapped->type) {
+          auto& copy = premultiplied.emplace_back(info.size);
+          std::memcpy(copy.data(), mapped, info.size);
+          reinterpret_cast<XrCompositionLayerBaseHeader*>(copy.data())->space = host_space;
+          mapped = reinterpret_cast<const XrCompositionLayerBaseHeader*>(copy.data());
+          break;
+        }
     layers.push_back(mapped);
     return XR_SUCCESS;
   };
@@ -1440,6 +1503,8 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
   PresentationLayers mapped(true);
   for (auto& layer : layers)
     layer = static_cast<const XrCompositionLayerBaseHeader*>(mapped.chain(layer));
+  log_eye_routing(layers);
+  if (layout_report.line) layout_report.host = layer_type_list(layers);
   auto host_info = *info;
   host_info.layerCount = static_cast<std::uint32_t>(layers.size());
   host_info.layers = layers.data();
@@ -1454,6 +1519,7 @@ XrResult xrEndFrame(XrSession handle, const XrFrameEndInfo *info) {
     if (!owned->copy(host_info)) owned.reset();
   }
   lock.unlock();
+  session_timeline::end_prep(monotonic_ns() - entered_ns);
   const auto result = owned ? session().end(&owned->info, owned) : session().end(&host_info);
   return result == XR_SUCCESS ? prepared : result;
 

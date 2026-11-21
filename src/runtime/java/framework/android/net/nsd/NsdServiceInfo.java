@@ -1,63 +1,97 @@
 package android.net.nsd;
 
+import android.net.Network;
 import android.os.Parcel;
 import android.os.Parcelable;
 import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.nio.charset.StandardCharsets;
 import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.TreeMap;
 
-/** Android DNS-SD service description. No service is advertised by Venture. */
+/** A DNS-SD service description (API 32 fields: name, type, host, port, TXT attributes, network). */
 public final class NsdServiceInfo implements Parcelable {
-  private String name, type;
+  private String serviceName, serviceType;
   private InetAddress host;
   private int port;
-  private final Map<String, byte[]> attributes = new LinkedHashMap<>();
-  public String getServiceName() { return name; }
-  public void setServiceName(String value) { name = value; }
-  public String getServiceType() { return type; }
-  public void setServiceType(String value) { type = value; }
+  private Network network;
+  // AOSP keeps TXT keys case-insensitively in insertion-independent order.
+  private final Map<String, byte[]> attributes = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+
+  public NsdServiceInfo() {}
+  public String getServiceName() { return serviceName; }
+  public void setServiceName(String name) { serviceName = name; }
+  public String getServiceType() { return serviceType; }
+  public void setServiceType(String type) { serviceType = type; }
   public InetAddress getHost() { return host; }
-  public void setHost(InetAddress value) { host = value; }
+  public void setHost(InetAddress host) { this.host = host; }
   public int getPort() { return port; }
-  public void setPort(int value) {
-    if (value < 0 || value > 65535) throw new IllegalArgumentException("Invalid port");
-    port = value;
-  }
+  public void setPort(int port) { this.port = port; }
+  public Network getNetwork() { return network; }
+  public void setNetwork(Network network) { this.network = network; }
+
+  // RFC 6763 TXT rules as AOSP checks them: printable US-ASCII keys without
+  // '=', key plus value at most 255 bytes, the whole record at most 1300.
   public void setAttribute(String key, String value) {
-    setAttribute(key, value == null ? null : value.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-  }
-  public void setAttribute(String key, byte[] value) {
-    if (key == null || key.isEmpty()) throw new IllegalArgumentException("Empty key");
-    for (int i = 0; i < key.length(); ++i)
-      if (key.charAt(i) < 0x20 || key.charAt(i) > 0x7e || key.charAt(i) == '=')
-        throw new IllegalArgumentException("Invalid TXT key");
-    if (key.length() + (value == null ? 0 : value.length) >= 255)
-      throw new IllegalArgumentException("TXT entry too large");
-    attributes.put(key, value == null ? null : value.clone());
+    byte[] bytes = value == null ? null : value.getBytes(StandardCharsets.UTF_8);
+    if (key == null || key.isEmpty()) throw new IllegalArgumentException("Key cannot be empty");
+    for (int i = 0; i < key.length(); ++i) {
+      char c = key.charAt(i);
+      if (c < 0x20 || c > 0x7e) throw new IllegalArgumentException("Key strings must be printable US-ASCII");
+      if (c == '=') throw new IllegalArgumentException("Key strings must not include '='");
+    }
+    if (key.length() + (bytes == null ? 0 : bytes.length) >= 255)
+      throw new IllegalArgumentException("Key length + value length must be < 255 bytes");
+    if (key.length() > 9) android.util.Log.w("NsdServiceInfo", "Key lengths > 9 are discouraged: " + key);
+    int size = 0;
+    for (Map.Entry<String, byte[]> e : attributes.entrySet())
+      if (!e.getKey().equalsIgnoreCase(key)) size += e.getKey().length() + (e.getValue() == null ? 0 : e.getValue().length) + 2;
+    size += key.length() + (bytes == null ? 0 : bytes.length) + 2;
+    if (size > 1300) throw new IllegalArgumentException("Total length of attributes must be < 1300 bytes");
+    else if (size > 400) android.util.Log.w("NsdServiceInfo", "Total length of all attributes exceeds 400 bytes; truncation may occur");
+    attributes.put(key, bytes);
   }
   public void removeAttribute(String key) { attributes.remove(key); }
   public Map<String, byte[]> getAttributes() { return Collections.unmodifiableMap(attributes); }
-  public int describeContents() { return 0; }
-  public void writeToParcel(Parcel out, int flags) {
-    out.writeString(name); out.writeString(type);
-    out.writeByteArray(host == null ? null : host.getAddress());
-    out.writeInt(port); out.writeInt(attributes.size());
-    attributes.forEach((key, value) -> { out.writeString(key); out.writeByteArray(value); });
+
+  @Override public String toString() {
+    return "name: " + serviceName + ", type: " + serviceType + ", host: " + host + ", port: " + port
+        + (network == null ? "" : ", network: " + network);
+  }
+  @Override public int describeContents() { return 0; }
+  @Override public void writeToParcel(Parcel dest, int flags) {
+    dest.writeString(serviceName);
+    dest.writeString(serviceType);
+    dest.writeInt(host == null ? 0 : 1);
+    if (host != null) dest.writeByteArray(host.getAddress());
+    dest.writeInt(port);
+    dest.writeInt(attributes.size());
+    for (Map.Entry<String, byte[]> e : attributes.entrySet()) {
+      dest.writeString(e.getKey());
+      dest.writeInt(e.getValue() == null ? -1 : 1);
+      if (e.getValue() != null) dest.writeByteArray(e.getValue());
+    }
   }
   public static final Creator<NsdServiceInfo> CREATOR = new Creator<>() {
-    public NsdServiceInfo createFromParcel(Parcel in) {
+    @Override public NsdServiceInfo createFromParcel(Parcel in) {
       NsdServiceInfo info = new NsdServiceInfo();
-      info.name = in.readString(); info.type = in.readString();
-      byte[] address = in.createByteArray();
-      if (address != null) try { info.host = InetAddress.getByAddress(address); }
-      catch (java.net.UnknownHostException e) { throw new IllegalArgumentException(e); }
-      info.setPort(in.readInt());
-      int count = in.readInt();
-      if (count < 0 || count > 65535) throw new IllegalArgumentException("Invalid TXT count");
-      for (int i = 0; i < count; ++i) info.setAttribute(in.readString(), in.createByteArray());
+      info.serviceName = in.readString();
+      info.serviceType = in.readString();
+      if (in.readInt() == 1) {
+        try {
+          info.host = InetAddress.getByAddress(in.createByteArray());
+        } catch (UnknownHostException e) {
+          info.host = null;
+        }
+      }
+      info.port = in.readInt();
+      for (int n = in.readInt(); n > 0; --n) {
+        String key = in.readString();
+        info.attributes.put(key, in.readInt() == -1 ? null : in.createByteArray());
+      }
       return info;
     }
-    public NsdServiceInfo[] newArray(int size) { return new NsdServiceInfo[size]; }
+    @Override public NsdServiceInfo[] newArray(int size) { return new NsdServiceInfo[size]; }
   };
 }
