@@ -377,11 +377,20 @@ public:
         control::check_stop(stop); library::uninstall(i.directory.parent_path().parent_path(), i); return Json{{"uninstalled", true}};
       });
     }
-    if (method == "saves.import") {
+    if (method == "saves.import" || method == "saves.export") {
       if ((running_.contains(i.id()) && !running_.at(i.id()).exit) || launch_pending_.contains(i.id()))
-        throw std::runtime_error("Stop the application before importing saves.");
+        throw std::runtime_error("Stop the application before transferring saves.");
       preferred_installs_[i.id()] = i.directory;
-      auto work = import_saves(i.id(), paths::from_utf8(str(p, "path")), str(p, "serial"));
+      if (method == "saves.export") {
+        auto work = export_saves(i.id(), str(p, "serial"), paths::from_utf8(str(p, "adbExecutable")));
+        return submit([work](std::stop_token stop, const control::Progress &) {
+          auto n = work(stop);
+          return Json{{"files", n.files}, {"kept", n.kept}, {"removed", n.removed},
+                      {"backup", paths::utf8(n.backup)}, {"hasPrivate", n.has_private}};
+        });
+      }
+      auto work = import_saves(i.id(), paths::from_utf8(str(p, "path")), str(p, "serial"),
+                               paths::from_utf8(str(p, "adbExecutable")));
       return submit([work](std::stop_token stop, const control::Progress &) {
         auto n = work(stop); return Json{{"files", n.files}, {"backup", paths::utf8(n.backup)}};
       });

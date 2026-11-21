@@ -46,7 +46,8 @@ def apk(path, package="com.example.control"):
 
 class Client:
     def __init__(self, profile):
-        self.process = subprocess.Popen([str(binary)], env=dict(os.environ, VENTURE_DATA_DIR=str(profile)),
+        self.process = subprocess.Popen([str(binary)], env=dict(os.environ, VENTURE_DATA_DIR=str(profile),
+                                        VENTURE_TEST_HEADSET_ROOT=str(profile.parent / "headset")),
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         encoding="utf-8", bufsize=1)
         self.messages = queue.Queue()
@@ -77,12 +78,15 @@ class Client:
         assert "error" not in message, message
         return message["result"]
 
-    def task(self, method, params):
+    def task(self, method, params, error=False):
         task_id = self.call(method, params)["taskId"]
         def completed(message):
             return next((t for t in message.get("tasks", []) if t["taskId"] == task_id and t["state"] != "running"), None)
         message = self.wait(completed)
         task = completed(message)
+        if error:
+            assert task["state"] == "failed" and task["error"], task
+            return task
         assert task["state"] == "complete", task
         return task["result"]
 
@@ -138,6 +142,7 @@ with tempfile.TemporaryDirectory(prefix="venture-control-rpc-") as directory:
         assert c.call("settings.get", params)["display"]["pcAudio"] == "off"
         (target / "probe-readiness").touch()
         c.call("play", params)
+        c.call("saves.export", dict(params, serial="QUEST-USB", adbExecutable=str(probe)), error=True)
         deadline = time.monotonic() + 20
         while not (target / "launch-options.json").exists() and time.monotonic() < deadline:
             c.call("task.get", {"taskId": "nonexistent"}, error=True)
@@ -173,6 +178,54 @@ with tempfile.TemporaryDirectory(prefix="venture-control-rpc-") as directory:
         (saves / "save").write_text("save two")
         result = c.task("saves.import", dict(params, path=str(saves)))
         assert result["backup"] and (Path(result["backup"]) / "Android-data/files/save").read_text() == "save one"
+        # The assistant supplies its bundled adb and the selected USB/Wi-Fi
+        # transport without changing the user's global adb setting. The core
+        # selects the headset application by the installation's package.
+        headset = root / "headset"
+        headset.mkdir()
+        headset_save = b"headset save\x00\r\n"
+        (headset / "save.dat").write_bytes(headset_save)
+        configured_adb = str(root / "unavailable-system-adb.exe")
+        Path(configured_adb).write_bytes(b"not an executable")
+        c.call("settings.set", {"changes": {"adbExecutable": configured_adb}})
+        request = dict(params, serial="QUEST-USB", adbExecutable=str(probe))
+        result = c.task("saves.import", request)
+        assert result["files"] == 1 and result["backup"], result
+        imported_save = Path(dirs["saves"]) / "external-data/files/save"
+        assert imported_save.read_bytes() == headset_save
+        assert (Path(result["backup"]) / "Android-data/files/save").read_text() == "save two"
+        assert c.call("settings.get")["adbExecutable"] == configured_adb
+        # Export backs up the exact selected headset before replacing its saves,
+        # including removing backed-up obsolete files in the exported folder.
+        imported_save.write_bytes(b"simulator updated")
+        (headset / "old.dat").write_bytes(b"old slot")
+        exported = c.task("saves.export", request)
+        assert exported["files"] == 1 and exported["removed"] == 1, exported
+        assert (headset / "save.dat").read_bytes() == b"simulator updated"
+        assert not (headset / "old.dat").exists()
+        assert (headset / "stopped").exists()
+        backup = Path(exported["backup"]) / "headset-Android-data/files"
+        assert (backup / "save").read_bytes() == headset_save
+        assert (backup / "old").read_bytes() == b"old slot"
+        assert imported_save.read_bytes() == b"simulator updated"
+        assert c.call("settings.get")["adbExecutable"] == configured_adb
+        # A failed push must not publish any changes to the headset.
+        (headset / "stopped").unlink()
+        (headset / "fail-push").touch()
+        imported_save.write_bytes(b"never published")
+        c.task("saves.export", request, error=True)
+        assert (headset / "save.dat").read_bytes() == b"simulator updated"
+        assert not (headset / "stopped").exists()
+        (headset / "fail-push").unlink()
+        imported_save.write_bytes(headset_save)
+        (headset / "missing-app").touch()
+        failure = c.task("saves.import", request, error=True)
+        assert "not installed" in failure["error"], failure
+        assert imported_save.read_bytes() == headset_save
+        c.task("saves.export", request, error=True)
+        assert (headset / "save.dat").read_bytes() == b"simulator updated"
+        c.call("saves.import", dict(request, adbExecutable="relative-adb.exe"), error=True)
+        c.call("saves.export", dict(request, adbExecutable="relative-adb.exe"), error=True)
         c.call("settings.reset", params)
         assert c.call("settings.get", params)["display"]["pcAudio"] == ""
         assert c.call("settings.get", params)["controls"] is None
@@ -210,6 +263,11 @@ with tempfile.TemporaryDirectory(prefix="venture-control-rpc-") as directory:
         assert pinned_dirs["saves"] != dirs["saves"]
         c.task("saves.import", dict(other, path=str(saves)))
         assert (Path(pinned_dirs["saves"]) / "external-data/files/save").read_text() == "save two"
+        (headset / "missing-app").unlink()
+        pinned_export = c.task("saves.export", dict(other, serial="QUEST-USB", adbExecutable=str(probe)))
+        assert (headset / "save.dat").read_text() == "save two"
+        assert "@1-456789" in pinned_export["backup"], pinned_export
+        assert imported_save.read_bytes() == headset_save
         # A real disk task can be cancelled through the protocol without publication.
         large = root / "cancel-patch/Android/obb/com.example.control" / obb.name
         large.parent.mkdir(parents=True)
@@ -226,7 +284,7 @@ with tempfile.TemporaryDirectory(prefix="venture-control-rpc-") as directory:
         assert (duplicate / obb.name).read_bytes() == b"modified expansion"
         c.task("uninstall", params)
         assert duplicate.exists(), "Uninstall must preserve the explicitly unselected copy"
-        assert (Path(dirs["saves"]) / "external-data/files/save").read_text() == "save two"
+        assert (Path(dirs["saves"]) / "external-data/files/save").read_bytes() == headset_save
     finally:
         c.close()
-print("PASS control install, modified files, launch environment, patch, save backup, reset, occupancy and uninstall")
+print("PASS control install, modified files, launch environment, patch, headset save import/export, backups, reset, occupancy and uninstall")

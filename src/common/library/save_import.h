@@ -51,7 +51,7 @@ struct Exported {
 // removed; a file that could not be backed up is never touched. Closes the game
 // on the headset. Throws when the game is not on it or there is nothing to send.
 Exported export_headset(const fs::path &data, std::string_view key, std::string_view package,
-                        const android::adb::Client &client, std::stop_token stop = {});
+                        const android::adb::Client &client, std::stop_token stop = {}, std::string_view pin = {});
 // Backups of `package` for `key`, newest last.
 fs::path backups_dir(const fs::path &data, std::string_view key, std::string_view package);
 }  // namespace venture::saves

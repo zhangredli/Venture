@@ -30,8 +30,28 @@ exits. The Flutter parent starts the process without a console window.
 | `settings.get` | Optional `installId`; game overrides include global values |
 | `settings.set` | Optional `installId`, `changes` JSON merge patch |
 | `settings.reset` | Optional `installId`; reset runtime defaults / inherit global |
-| `saves.import` | `installId`, local `path` or optional headset `serial` |
+| `saves.import` | `installId`, local `path` or optional headset `serial` and per-request `adbExecutable` |
+| `saves.export` | `installId`, optional headset `serial` and per-request `adbExecutable`; task result includes files/kept/removed/backup/hasPrivate |
 | `task.get`, `task.cancel` | `taskId` |
+
+For headset save imports, the assistant supplies the selected ADB transport and
+its bundled executable. The override must be an existing absolute executable
+path and applies to this request only; it is not saved in settings. The
+installation's package selects the headset app, and existing save locking,
+pinned-version/account storage, staging and backup handling remain in effect.
+Imports read ADB-accessible `Android/data/<package>` files, not Android private
+storage. The control RPC regression uses a binary-clean fake headset to check
+device/package selection, imported bytes, backups and missing-app preservation.
+
+`saves.export` sends the selected installation/account's shared saves to the same
+package on the selected headset, including pinned-version storage in control
+mode. It uses upstream's backup, remote staging and size/count verification
+before stopping the headset game and publishing the files. Unreadable files
+that could not be backed up are kept on the headset; private Android storage is
+not exported. Both directions require the emulator game to be stopped. The
+Flutter UI uses the existing confirmation dialog and makes no task request
+until the user accepts the target-specific overwrite warning. Cancelling or
+closing the confirmation leaves both copies untouched.
 
 Long operations return `{"taskId":"..."}` immediately. State events contain
 `{"event":"state","library":[],"tasks":[],"scanning":false,"notice":"","warning":""}`.
@@ -158,3 +178,13 @@ Merge verification (Windows, runtime and GUI disabled in the verification build)
 The monolithic `venture_tests` target does not link with the runtime disabled:
 its HLE/loader tests require runtime symbols. This verification does not cover a
 complete runtime/Release build or actual Vulkan/OpenXR gameplay.
+
+On 2026-11-21, the full Windows runtime and control-only distribution were also
+built successfully, including the headset-save-import ADB override. All six
+integration CTests (`control_install`, `control_rpc`, `local_user_broker`,
+`launcher_settings_cli`, `framework_java`, `framework_nsd`) passed. The packaged
+control executable passed the RPC regression with a system-only PATH; its
+`hello` response reports `0.2.5.1`. The Flutter 3.9.5 Windows installer includes
+all 273 manifest-listed components plus the manifest itself, with matching
+hashes and the JRE EC crypto module. Real headset save import and gameplay remain
+hardware acceptance items.

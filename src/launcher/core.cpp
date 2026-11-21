@@ -1557,7 +1557,8 @@ static std::shared_ptr<FileLock> save_lock(const fs::path &data, const std::stri
                              "or the game is open in another Venture window.");
   }
 }
-Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &folder, std::string serial) {
+Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &folder, std::string serial,
+                                  const fs::path &adb_override) {
   auto current = installed(app_id, false);
   if (!current) throw std::runtime_error("Install this game before importing its save data.");
   if (current->plan.pinned && !options_.control) throw std::runtime_error("Save data imports go to the game's own install.");
@@ -1578,7 +1579,9 @@ Core::SaveImport Core::import_saves(std::string_view app_id, const fs::path &fol
                                  "Android/data/" + package + " folder, or of its files folder.");
       return saves::import_local(data, key, package, *found, stop, pin);
     };
-  const auto adb = adb_path();
+  const auto adb = adb_override.empty() ? adb_path() : adb_override;
+  if (!adb_override.empty() && (!adb.is_absolute() || !fs::is_regular_file(adb)))
+    throw std::runtime_error("The assistant's adb executable is missing or invalid.");
   if (adb.empty()) throw std::runtime_error("adb was not found. Install Android platform-tools, or set adb's location in Settings.");
   return [data = data_, key, package, adb, serial, lock, pin](std::stop_token stop) {
     return saves::import_headset(data, key, package, headset(adb, serial, stop), stop, pin);
@@ -1596,10 +1599,12 @@ android::adb::Client Core::headset(const fs::path &adb, std::string serial, std:
   }
   return android::adb::Client(adb, std::move(serial));
 }
-Core::SaveExport Core::export_saves(std::string_view app_id, std::string serial) {
+Core::SaveExport Core::export_saves(std::string_view app_id, std::string serial,
+                                  const fs::path &adb_override) {
   auto current = installed(app_id, false);
   if (!current) throw std::runtime_error("Install this game before sending its save data.");
-  if (current->plan.pinned) throw std::runtime_error("Save data exports come from the game's own install.");
+  if (current->plan.pinned && !options_.control) throw std::runtime_error("Save data exports come from the game's own install.");
+  const auto pin = current->plan.pinned ? current->plan.folder() : std::string();
   const auto package = current->plan.package;
   auto running = running_.find(std::string(app_id));
   if (running != running_.end() && !running->second.exit)
@@ -1608,10 +1613,12 @@ Core::SaveExport Core::export_saves(std::string_view app_id, std::string serial)
   auto lock = save_lock(data_, package);
   auto key = launch_choice(app_id, play_key(app_id)).account_key;
   if (key.empty()) key = "local";
-  const auto adb = adb_path();
+  const auto adb = adb_override.empty() ? adb_path() : adb_override;
+  if (!adb_override.empty() && (!adb.is_absolute() || !fs::is_regular_file(adb)))
+    throw std::runtime_error("The assistant's adb executable is missing or invalid.");
   if (adb.empty()) throw std::runtime_error("adb was not found. Install Android platform-tools, or set adb's location in Settings.");
-  return [data = data_, key, package, adb, serial, lock](std::stop_token stop) {
-    return saves::export_headset(data, key, package, headset(adb, serial, stop), stop);
+  return [data = data_, key, package, adb, serial, lock, pin](std::stop_token stop) {
+    return saves::export_headset(data, key, package, headset(adb, serial, stop), stop, pin);
   };
 }
 void Core::export_saves_later(std::string_view app_id) {

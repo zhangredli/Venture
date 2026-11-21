@@ -327,13 +327,15 @@ protected:
   // first ready one unless `serial`). Checks now that the game is installed
   // and closed and holds its lock; the returned task copies (on any thread).
   using SaveImport = std::function<saves::Imported(std::stop_token)>;
-  SaveImport import_saves(std::string_view app_id, const fs::path &folder, std::string serial = {});
+  SaveImport import_saves(std::string_view app_id, const fs::path &folder, std::string serial = {},
+                         const fs::path &adb_override = {});
   // The same on the import thread; a notice reports the result.
   void import_saves_later(std::string_view app_id, const fs::path &folder);
   // Sends an installed game's saves for the account it plays as back to a
   // headset over adb (saves::export_headset), with import_saves' checks.
   using SaveExport = std::function<saves::Exported(std::stop_token)>;
-  SaveExport export_saves(std::string_view app_id, std::string serial = {});
+  SaveExport export_saves(std::string_view app_id, std::string serial = {},
+                         const fs::path &adb_override = {});
   void export_saves_later(std::string_view app_id);
   // `serial`, or with none the first ready headset; throws saying why none is.
   static android::adb::Client headset(const fs::path &adb, std::string serial, std::stop_token stop);

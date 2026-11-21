@@ -211,10 +211,11 @@ Imported import_headset(const fs::path &data, std::string_view key, std::string_
 }
 
 Exported export_headset(const fs::path &data, std::string_view key, std::string_view package,
-                        const android::adb::Client &client, std::stop_token stop) {
-  const auto game_root = account_data_dir(data, key, package);
+                        const android::adb::Client &client, std::stop_token stop, std::string_view pin) {
+  const auto game_root = account_data_dir(data, key, package, pin);
   const auto from = game_root / "external-data";
-  const auto backups = backups_dir(data, key, package);
+  auto backups = backups_dir(data, key, package);
+  if (!pin.empty()) backups = backups.parent_path() / paths::from_utf8(std::string(package) + "@" + std::string(pin));
   const auto app = client.app(package, stop);
   if (!app) throw std::runtime_error("This game is not installed on the headset.");
   const auto stamp = new_stamp(backups);
